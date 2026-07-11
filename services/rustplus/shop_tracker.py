@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+
+class ShopTracker:
+    """Алерты магазинов и простая аналитика сделок."""
+
+    def __init__(self) -> None:
+        self._seen_ids: Set[int] = set()
+        self._stock_state: Dict[int, bool] = {}
+        self._primed = False
+
+    def reset(self) -> None:
+        self._seen_ids.clear()
+        self._stock_state.clear()
+        self._primed = False
+
+    def detect_changes(
+        self,
+        vendors: List[Dict[str, Any]],
+        *,
+        alerts_enabled: bool = True,
+    ) -> List[Dict[str, str]]:
+        if not alerts_enabled:
+            self._prime(vendors)
+            return []
+
+        alerts: List[Dict[str, str]] = []
+        current_ids = {int(v["id"]) for v in vendors if v.get("id") is not None}
+
+        if not self._primed:
+            self._prime(vendors)
+            return alerts
+
+        for vendor in vendors:
+            vid = vendor.get("id")
+            if vid is None:
+                continue
+            vid = int(vid)
+            if vid not in self._seen_ids:
+                alerts.append(
+                    {
+                        "title": "Новый магазин",
+                        "message": f"🛒 {vendor.get('name', 'Магазин')} [{vendor.get('grid', '?')}]",
+                    }
+                )
+
+            out = bool(vendor.get("out_of_stock"))
+            prev = self._stock_state.get(vid)
+            if prev is False and out:
+                alerts.append(
+                    {
+                        "title": "Магазин пуст",
+                        "message": f"📭 {vendor.get('name', 'Магазин')} [{vendor.get('grid', '?')}]",
+                    }
+                )
+            if prev is True and not out:
+                alerts.append(
+                    {
+                        "title": "Товар в наличии",
+                        "message": f"✅ {vendor.get('name', 'Магазин')} снова в наличии [{vendor.get('grid', '?')}]",
+                    }
+                )
+            self._stock_state[vid] = out
+
+        for lost_id in self._seen_ids - current_ids:
+            alerts.append({"title": "Магазин пропал", "message": f"❌ Магазин #{lost_id} исчез с карты"})
+
+        self._seen_ids = current_ids
+        return alerts
+
+    def _prime(self, vendors: List[Dict[str, Any]]) -> None:
+        self._seen_ids = {int(v["id"]) for v in vendors if v.get("id") is not None}
+        self._stock_state = {
+            int(v["id"]): bool(v.get("out_of_stock"))
+            for v in vendors
+            if v.get("id") is not None
+        }
+        self._primed = True
+
+    def profit_trades(self, vendors: List[Dict[str, Any]], item_id: int) -> List[Dict[str, Any]]:
+        buys: List[Tuple[int, str, Dict[str, Any]]] = []
+        sells: List[Tuple[int, str, Dict[str, Any]]] = []
+
+        for vendor in vendors:
+            grid = vendor.get("grid", "?")
+            for order in vendor.get("sell_orders", []):
+                if int(order.get("item_id", -1)) != int(item_id):
+                    continue
+                cost = int(order.get("cost_per_item", 0))
+                currency = int(order.get("currency_id", 0))
+                entry = {"vendor": vendor.get("name"), "grid": grid, "order": order}
+                sells.append((cost, grid, entry))
+                if currency == item_id:
+                    buys.append((cost, grid, entry))
+
+        results: List[Dict[str, Any]] = []
+        for buy_cost, buy_grid, buy_entry in sorted(buys, key=lambda x: x[0]):
+            for sell_cost, sell_grid, sell_entry in sorted(sells, key=lambda x: -x[0]):
+                if sell_cost > buy_cost:
+                    results.append(
+                        {
+                            "item_id": item_id,
+                            "profit": sell_cost - buy_cost,
+                            "buy": buy_entry,
+                            "sell": sell_entry,
+                            "route": f"Купить [{buy_grid}] → Продать [{sell_grid}]",
+                        }
+                    )
+        return results[:10]

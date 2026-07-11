@@ -31,3 +31,6 @@ class Feature(ABC):
 
     def on_hide(self) -> None:
         """Вызывается при скрытии вкладки."""
+
+    def on_shutdown(self) -> None:
+        """Вызывается при завершении приложения."""

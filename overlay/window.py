@@ -6,15 +6,16 @@ from typing import Dict, List, Optional
 import customtkinter as ctk
 
 from features.base import Feature
+from overlay.toast import ToastManager
 
 
 class OverlayWindow:
     """Полупрозрачное окно поверх игры с переключением по F5."""
 
     BG_COLOR = "#0d1117"
-    ACCENT = "#c45c26"
-    SIDEBAR_WIDTH = 180
-    TOP_BAR_HEIGHT = 42
+    ACCENT = "#e07a3a"
+    SIDEBAR_WIDTH = 190
+    TOP_BAR_HEIGHT = 44
     MIN_WIDTH = 640
     MIN_HEIGHT = 320
 
@@ -33,6 +34,7 @@ class OverlayWindow:
         ctk.set_default_color_theme("dark-blue")
 
         self.root = ctk.CTk()
+        self._toast = ToastManager(self.root)
         self.root.title("Rust Utility Overlay")
         self.root.configure(fg_color=self.BG_COLOR)
         self.root.overrideredirect(True)
@@ -60,19 +62,25 @@ class OverlayWindow:
         top_bar.pack(fill="x")
         top_bar.pack_propagate(False)
 
-        ctk.CTkLabel(
-            top_bar,
-            text="Rust Utility",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#e8ecf4",
-        ).pack(side="left", padx=14)
+        accent = ctk.CTkFrame(top_bar, fg_color=self.ACCENT, height=3, corner_radius=0)
+        accent.pack(fill="x", side="top")
+
+        bar_body = ctk.CTkFrame(top_bar, fg_color="transparent")
+        bar_body.pack(fill="both", expand=True)
 
         ctk.CTkLabel(
-            top_bar,
-            text="F5 — показать/скрыть  |  F6 — выход",
+            bar_body,
+            text="Rust Utility",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#e8ecf4",
+        ).pack(side="left", padx=14, pady=8)
+
+        ctk.CTkLabel(
+            bar_body,
+            text="F5 — оверлей   ·   F6 — выход",
             font=ctk.CTkFont(size=11),
             text_color="#6b7280",
-        ).pack(side="left", padx=8)
+        ).pack(side="left", padx=4, pady=8)
 
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill="x")
@@ -115,6 +123,8 @@ class OverlayWindow:
                 self._nav_frame,
                 text=feature.title,
                 anchor="w",
+                height=34,
+                corner_radius=8,
                 fg_color="transparent",
                 hover_color="#242b3d",
                 text_color="#d1d7e3",
@@ -175,14 +185,14 @@ class OverlayWindow:
                 prev_frame.pack_forget()
             prev_btn = self._nav_buttons.get(self._current_feature_id)
             if prev_btn:
-                prev_btn.configure(fg_color="transparent")
+                prev_btn.configure(fg_color="transparent", border_width=0)
 
         self._current_feature_id = feature_id
         frame = self._feature_frames[feature_id]
         frame.pack(fill="x")
 
         btn = self._nav_buttons[feature_id]
-        btn.configure(fg_color="#2a3142")
+        btn.configure(fg_color="#2a3142", border_width=1, border_color="#e07a3a")
 
         feature = self._feature_map[feature_id]
         feature.on_show()
@@ -217,6 +227,9 @@ class OverlayWindow:
 
     def is_visible(self) -> bool:
         return self._visible
+
+    def show_live_alert(self, message: str) -> None:
+        self._toast.show(message)
 
     def run(self) -> None:
         self.root.mainloop()

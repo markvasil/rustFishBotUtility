@@ -58,7 +58,32 @@ python -m PyInstaller rust_utility.spec --noconfirm
 
 ## Текущие функции
 
-Оверлей содержит **8 вкладок**. Данные рейда, крафта, заметок и таймеров сохраняются в `data/session.json` между запусками.
+Оверлей содержит **9 вкладок**. Данные рейда, крафта, заметок и таймеров сохраняются в `session.json` между запусками. Данные Rust+ — в `%APPDATA%\RustUtilityOverlay\rustplus\`.
+
+### Rust+ Live (`rustplus_hub`) — первая вкладка
+
+Live-компаньон к серверу через официальный **Rust+ Companion API** (как мобильное приложение).
+
+**Подключение:**
+
+1. `scripts/setup_rustplus_runtime.ps1` — Node.js + rustplus-cli (один раз)
+2. **Steam (Chrome/Edge)** — регистрация FCM
+3. **Старт listener** → в игре **Pair Server** → **Resend notification**
+4. **Connect** (нужно быть на сервере в игре; закройте мобильный Rust+)
+
+**Что умеет:**
+
+| Блок | Описание |
+|------|----------|
+| Команда | Онлайн/жив, грид на карте |
+| Алерты | Карго, верт, chinook, смерть тиммейта (+ team chat), Smart Alarm |
+| Магазины | Поиск вендингов по названию / item id |
+| Устройства | Smart Switch ON/OFF, Alarm, Storage Monitor |
+| Камеры | CCTV / PTZ просмотр (WASD + мышь) |
+| Карта | Превью, окно крупно, миникарта с drag и точками команды |
+| Чат | Team chat |
+
+**Данные:** `%APPDATA%\RustUtilityOverlay\rustplus\` — `data.json`, `rustplusjs-config.json`, `pairing.log`, `map_live.jpg`
 
 ### 1. Калькулятор рейда (`raid_calculator`)
 
@@ -203,12 +228,14 @@ python -m PyInstaller rust_utility.spec --noconfirm
 main.py
   │
   ├── keyboard (глобальные хоткеи F5/F6)
-  ├── SessionStore (storage/session.py) → data/session.json
+  ├── SessionStore (storage/session.py) → session.json
+  ├── RustPlusService (services/rustplus/) → FCM + WebSocket live
   ├── TimerManager (services/timer_manager.py)
   │
   └── OverlayWindow (overlay/window.py)
         ├── боковое меню функций
         └── Feature[] — вкладки с инструментами
+              ├── RustPlusHubFeature
               ├── RaidCalculatorFeature
               ├── CraftCalculatorFeature
               ├── FurnaceCalculatorFeature
@@ -322,14 +349,24 @@ rustFishBotUtility/
 │   └── window.py                    # OverlayWindow — окно оверлея, навигация, topmost
 │
 ├── storage/
-│   └── session.py                   # SessionStore — сохранение между запусками
+│   ├── session.py                   # SessionStore — сохранение между запусками
+│   └── rustplus_store.py            # Паринг серверов, устройств, камер
 │
 ├── services/
-│   └── timer_manager.py             # Фоновые таймеры с уведомлением
+│   ├── timer_manager.py             # Фоновые таймеры с уведомлением
+│   └── rustplus/                    # FCM bridge, WebSocket, event bus
+│
+├── runtime/                         # Node + rustplus-cli (setup_rustplus_runtime.ps1)
 │
 └── features/
     ├── __init__.py
     ├── base.py                      # ABC Feature — контракт для всех функций
+    │
+    └── rustplus_hub/                # Rust+ Live — pairing, карта, камеры
+        ├── widget.py
+        ├── map_window.py
+        ├── minimap_window.py
+        └── camera_window.py
     │
     └── raid_calculator/
         ├── __init__.py
@@ -367,6 +404,9 @@ rustFishBotUtility/
 | `keyboard` | Глобальные хоткеи F5/F6 (работают когда игра в фокусе) |
 | `Pillow` | Зависимость CustomTkinter для изображений |
 | `pywin32` | Windows API (дополнительные стили окна через `ctypes`) |
+| `rustplus` | Rust+ Companion WebSocket API |
+| `websockets` | WebSocket для rustplus |
+| `numpy`, `scipy` | Рендер CCTV камер (rustplus) |
 
 ---
 
@@ -407,6 +447,7 @@ rustFishBotUtility/
 
 | Задача | Куда |
 |--------|------|
+| Live Rust+ / pairing / карта | `services/rustplus/`, `features/rustplus_hub/` |
 | Новый инструмент / вкладка | `features/<name>/` + регистрация в `main.py` |
 | Игровые данные (HP, урон, рецепты) | `features/raid_calculator/data.py` |
 | Логика расчётов рейда | `features/raid_calculator/calculator.py` |
