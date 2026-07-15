@@ -50,10 +50,19 @@ class ConnectionManager:
         self._camera_id: Optional[str] = None
         self._camera_frame_task: Optional[asyncio.Task] = None
         self._camera_controls: Dict[str, bool] = {}
+        self._stay_connected = False
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._poll_failures = 0
+        self._POLL_REQUEST_TIMEOUT_SEC = 15.0
+        self._MAX_POLL_FAILURES = 3
+        self._RECONNECT_DELAYS_SEC = (3, 5, 10, 20, 30, 60)
+        self._POLL_INTERVAL_MIN_SEC = 5
+        self._POLL_INTERVAL_MAX_SEC = 20
+        self._POLL_INTERVAL_DEFAULT_SEC = 10
 
     @property
     def is_connected(self) -> bool:
-        return self._socket is not None and self._connected_server is not None
+        return self._connected_server is not None and self._socket_alive()
 
     @property
     def connected_server(self) -> Optional[PairedServer]:
@@ -68,11 +77,16 @@ class ConnectionManager:
 
     def stop(self) -> None:
         self._running = False
+        self._stay_connected = False
         if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop)
+            asyncio.run_coroutine_threadsafe(self._disconnect(intentional=True), self._loop)
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+        self._thread = None
 
     def connect(self, server: PairedServer) -> None:
+        self._stay_connected = True
         self.start()
         if not self._loop_ready.wait(timeout=5.0):
             self._bus.emit(EventType.ERROR, message="Подключение: event loop не запустился")
@@ -81,8 +95,9 @@ class ConnectionManager:
         asyncio.run_coroutine_threadsafe(self._connect(server), self._loop)
 
     def disconnect(self) -> None:
+        self._stay_connected = False
         if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop)
+            asyncio.run_coroutine_threadsafe(self._disconnect(intentional=True), self._loop)
 
     def send_team_message(self, text: str) -> None:
         if not self._loop:
@@ -149,6 +164,11 @@ class ConnectionManager:
             return
         asyncio.run_coroutine_threadsafe(self._toggle_group(group_id, action), self._loop)
 
+    def toggle_entity(self, entity_id: int, action: str) -> None:
+        if not self._loop or not self.is_connected:
+            return
+        asyncio.run_coroutine_threadsafe(self._toggle_entity(entity_id, action), self._loop)
+
     def get_entity_info_sync(self, entity_id: int) -> Any:
         if not self._loop or not self.is_connected:
             return None
@@ -185,6 +205,7 @@ class ConnectionManager:
             self._loop.close()
 
     async def _connect(self, server: PairedServer) -> None:
+        await self._cancel_reconnect()
         await self._disconnect()
 
         last_error: Optional[Exception] = None
@@ -313,7 +334,10 @@ class ConnectionManager:
 
         raise ConnectionError(self._not_found_help(last_reason, server))
 
-    async def _disconnect(self) -> None:
+    async def _disconnect(self, *, intentional: bool = False) -> None:
+        if intentional:
+            self._stay_connected = False
+        await self._cancel_reconnect()
         if self._poll_task:
             self._poll_task.cancel()
             self._poll_task = None
@@ -453,11 +477,12 @@ class ConnectionManager:
 
             self._bus.emit(EventType.STATUS, message="Загрузка карты...")
             alerts = self._store.get_alert_settings()
+            layers = self._store.get_map_layers()
             map_image = await self._socket.get_map(
-                add_icons=True,
+                add_icons=layers.monuments,
                 add_events=alerts.cargo,
-                add_vending_machines=alerts.shop,
-                add_team_positions=True,
+                add_vending_machines=layers.shops,
+                add_team_positions=layers.players,
                 add_grid=True,
             )
             if isinstance(map_image, RustError):
@@ -473,11 +498,121 @@ class ConnectionManager:
         except Exception as exc:
             self._bus.emit(EventType.ERROR, message=f"Карта: {exc}")
 
+        self._poll_failures = 0
+        if server_id:
+            self._bus.emit(EventType.DISCONNECTED, server_id=server_id)
+
+    def _socket_alive(self) -> bool:
+        socket = self._socket
+        if socket is None:
+            return False
+        ws = getattr(socket, "ws", None)
+        if ws is None:
+            return False
+        task = getattr(ws, "task", None)
+        if task is not None and task.done():
+            return False
+        connection = getattr(ws, "connection", None)
+        if connection is None:
+            return False
+        if getattr(connection, "closed", False):
+            return False
+        return bool(getattr(ws, "open", False))
+
+    @staticmethod
+    def _is_connection_lost_error(exc: BaseException) -> bool:
+        if isinstance(exc, (ConnectionError, ConnectionResetError, BrokenPipeError)):
+            return True
+        if isinstance(exc, OSError):
+            winerror = getattr(exc, "winerror", None)
+            if winerror in {10054, 10053, 121}:
+                return True
+        message = str(exc).lower()
+        markers = (
+            "connection interrupted",
+            "no close frame",
+            "websocket",
+            "message failed to send",
+            "no response received",
+            "data transfer failed",
+            "превышен таймаут семафора",
+            "semaphore timeout",
+        )
+        return any(marker in message for marker in markers)
+
+    async def _cancel_reconnect(self) -> None:
+        if not self._reconnect_task:
+            return
+        self._reconnect_task.cancel()
+        try:
+            await self._reconnect_task
+        except asyncio.CancelledError:
+            pass
+        self._reconnect_task = None
+
+    async def _handle_connection_lost(self, reason: str) -> None:
+        server = self._connected_server
+        if not server:
+            return
+        self._bus.emit(
+            EventType.STATUS,
+            message=f"Соединение потеряно ({reason}). Переподключение...",
+        )
+        await self._disconnect()
+        if not self._running or not self._stay_connected:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop(server))
+
+    async def _reconnect_loop(self, server: PairedServer) -> None:
+        for index, delay in enumerate(self._RECONNECT_DELAYS_SEC):
+            if not self._running or not self._stay_connected:
+                return
+            if index > 0:
+                self._bus.emit(
+                    EventType.STATUS,
+                    message=f"Повтор подключения к {server.name} через {delay} с...",
+                )
+                await asyncio.sleep(delay)
+            try:
+                await self._connect(server)
+                if self.is_connected:
+                    self._bus.emit(
+                        EventType.STATUS,
+                        message=f"Снова подключено к {server.name}",
+                    )
+                    return
+            except Exception as exc:
+                self._bus.emit(EventType.ERROR, message=f"Переподключение: {exc}")
+        self._stay_connected = False
+        self._bus.emit(
+            EventType.ERROR,
+            message="Не удалось восстановить соединение с сервером",
+        )
+
+    async def _poll_request(self, coro):
+        return await asyncio.wait_for(coro, timeout=self._POLL_REQUEST_TIMEOUT_SEC)
+
+    def _poll_interval_sec(self) -> float:
+        raw = int(getattr(self._store.get_settings(), "poll_interval_sec", self._POLL_INTERVAL_DEFAULT_SEC))
+        clamped = max(self._POLL_INTERVAL_MIN_SEC, min(self._POLL_INTERVAL_MAX_SEC, raw))
+        return float(clamped)
+
     async def _poll_loop(self) -> None:
         while self._running and self._socket:
+            if not self._socket_alive():
+                await self._handle_connection_lost("WebSocket закрыт")
+                break
             try:
-                time_info = await self._socket.get_time()
-                if not isinstance(time_info, RustError):
+                time_info = await self._poll_request(self._socket.get_time())
+                if isinstance(time_info, RustError):
+                    self._poll_failures += 1
+                    if self._poll_failures >= self._MAX_POLL_FAILURES:
+                        await self._handle_connection_lost(time_info.reason or "get_time")
+                        break
+                else:
+                    self._poll_failures = 0
                     self._server_time_raw = time_info.raw_time
                     self._bus.emit(
                         EventType.SERVER_TIME,
@@ -485,8 +620,11 @@ class ConnectionManager:
                         raw_time=time_info.raw_time,
                     )
 
-                team = await self._socket.get_team_info()
-                if not isinstance(team, RustError):
+                team = await self._poll_request(self._socket.get_team_info())
+                if isinstance(team, RustError):
+                    self._poll_failures += 1
+                else:
+                    self._poll_failures = 0
                     payload = format_team(team, self._map_size)
                     self._team_cache = payload
                     self._bus.emit(EventType.TEAM_INFO, **payload)
@@ -495,8 +633,11 @@ class ConnectionManager:
                     for death in self._team_tracker.detect_deaths(payload.get("members", [])):
                         await self._notify_team_death(death)
 
-                markers = await self._socket.get_markers()
-                if not isinstance(markers, RustError):
+                markers = await self._poll_request(self._socket.get_markers())
+                if isinstance(markers, RustError):
+                    self._poll_failures += 1
+                else:
+                    self._poll_failures = 0
                     payload = format_markers(markers, self._map_size)
                     self._markers_cache = payload
                     self._bus.emit(EventType.MARKERS, **payload)
@@ -528,11 +669,21 @@ class ConnectionManager:
                             message=alert["message"],
                             category="shop",
                         )
+                if self._poll_failures >= self._MAX_POLL_FAILURES:
+                    await self._handle_connection_lost("нет ответа от сервера")
+                    break
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                if self._is_connection_lost_error(exc):
+                    await self._handle_connection_lost(str(exc))
+                    break
+                self._poll_failures += 1
                 self._bus.emit(EventType.ERROR, message=f"Polling: {exc}")
-            await asyncio.sleep(20)
+                if self._poll_failures >= self._MAX_POLL_FAILURES:
+                    await self._handle_connection_lost(str(exc))
+                    break
+            await asyncio.sleep(self._poll_interval_sec())
 
     async def _notify_team_death(self, death: Dict[str, Any]) -> None:
         name = death.get("name", "Игрок")
@@ -582,6 +733,18 @@ class ConnectionManager:
             category="alarm",
         )
 
+    async def _toggle_entity(self, entity_id: int, action: str) -> None:
+        if not self._socket:
+            return
+        if action == "on":
+            await self._set_entity(entity_id, True)
+        elif action == "off":
+            await self._set_entity(entity_id, False)
+        else:
+            info = await self._get_entity_info(entity_id)
+            current = bool(getattr(info, "value", False)) if info else False
+            await self._set_entity(entity_id, not current)
+
     async def _toggle_group(self, group_id: str, action: str) -> None:
         group = next((g for g in self._store.list_device_groups() if g.id == group_id), None)
         if not group or not self._socket:
@@ -591,14 +754,7 @@ class ConnectionManager:
             device = devices.get(device_id)
             if not device or device.device_type != "smart_switch":
                 continue
-            if action == "on":
-                await self._set_entity(device.entity_id, True)
-            elif action == "off":
-                await self._set_entity(device.entity_id, False)
-            else:
-                info = await self._get_entity_info(device.entity_id)
-                current = bool(getattr(info, "value", False)) if info else False
-                await self._set_entity(device.entity_id, not current)
+            await self._toggle_entity(device.entity_id, action)
 
     @staticmethod
     def _event_category(event: Dict[str, Any]) -> str:

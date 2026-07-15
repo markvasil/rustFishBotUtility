@@ -1,0 +1,26 @@
+[
+  {
+    "name": "alt",
+    "scan": 56,
+    "is_keypad": false,
+    "vk_guess": null
+  },
+  {
+    "name": "tab",
+    "scan": 15,
+    "is_keypad": false,
+    "vk_guess": null
+  },
+  {
+    "name": "alt",
+    "scan": 56,
+    "is_keypad": false,
+    "vk_guess": null
+  },
+  {
+    "name": "tab",
+    "scan": 15,
+    "is_keypad": false,
+    "vk_guess": null
+  }
+]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 
@@ -19,7 +19,13 @@ class OverlayWindow:
     MIN_WIDTH = 640
     MIN_HEIGHT = 320
 
-    def __init__(self, features: Optional[List[Feature]] = None) -> None:
+    def __init__(
+        self,
+        features: Optional[List[Feature]] = None,
+        *,
+        initial_position: Optional[Tuple[int, int]] = None,
+        on_position_changed: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
         self._features: List[Feature] = []
         self._feature_map: Dict[str, Feature] = {}
         self._visible = False
@@ -29,6 +35,9 @@ class OverlayWindow:
         self._feature_frames: Dict[str, ctk.CTkFrame] = {}
         self._nav_frame: Optional[ctk.CTkScrollableFrame] = None
         self._content: Optional[ctk.CTkFrame] = None
+        self._saved_position = initial_position
+        self._on_position_changed = on_position_changed
+        self._drag_offset: Optional[Tuple[int, int]] = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -58,29 +67,43 @@ class OverlayWindow:
         return self._feature_map.get(feature_id)
 
     def _build_shell(self) -> None:
-        top_bar = ctk.CTkFrame(self.root, fg_color="#141a28", height=self.TOP_BAR_HEIGHT, corner_radius=0)
+        top_bar = ctk.CTkFrame(
+            self.root, fg_color="#141a28", height=self.TOP_BAR_HEIGHT, corner_radius=0, cursor="fleur",
+        )
         top_bar.pack(fill="x")
         top_bar.pack_propagate(False)
 
         accent = ctk.CTkFrame(top_bar, fg_color=self.ACCENT, height=3, corner_radius=0)
         accent.pack(fill="x", side="top")
 
-        bar_body = ctk.CTkFrame(top_bar, fg_color="transparent")
+        bar_body = ctk.CTkFrame(top_bar, fg_color="transparent", cursor="fleur")
         bar_body.pack(fill="both", expand=True)
+
+        ctk.CTkLabel(
+            bar_body,
+            text="⠿",
+            font=ctk.CTkFont(size=14),
+            text_color="#6b7280",
+            cursor="fleur",
+        ).pack(side="left", padx=(10, 0), pady=8)
 
         ctk.CTkLabel(
             bar_body,
             text="Rust Utility",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color="#e8ecf4",
-        ).pack(side="left", padx=14, pady=8)
+            cursor="fleur",
+        ).pack(side="left", padx=(6, 14), pady=8)
 
         ctk.CTkLabel(
             bar_body,
-            text="F5 — оверлей   ·   F6 — выход",
+            text="F5 — оверлей   ·   F6 — выход   ·   шапка — перемещение",
             font=ctk.CTkFont(size=11),
             text_color="#6b7280",
+            cursor="fleur",
         ).pack(side="left", padx=4, pady=8)
+
+        self._bind_drag_tree(top_bar)
 
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill="x")
@@ -167,10 +190,48 @@ class OverlayWindow:
         width = min(width, screen_w - 40)
         height = min(height, screen_h - 40)
 
-        x = (screen_w - width) // 2
-        y = (screen_h - height) // 2
+        if self._saved_position:
+            x, y = self._saved_position
+            x = max(0, min(x, screen_w - width))
+            y = max(0, min(y, screen_h - height))
+            self._saved_position = (x, y)
+        else:
+            x = (screen_w - width) // 2
+            y = (screen_h - height) // 2
 
         self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _bind_drag(self, widget) -> None:
+        widget.bind("<ButtonPress-1>", self._start_drag, add="+")
+        widget.bind("<B1-Motion>", self._on_drag, add="+")
+        widget.bind("<ButtonRelease-1>", self._end_drag, add="+")
+
+    def _bind_drag_tree(self, widget) -> None:
+        self._bind_drag(widget)
+        for child in widget.winfo_children():
+            self._bind_drag_tree(child)
+
+    def _start_drag(self, event) -> None:
+        self._drag_offset = (
+            event.x_root - self.root.winfo_x(),
+            event.y_root - self.root.winfo_y(),
+        )
+
+    def _on_drag(self, event) -> None:
+        if self._drag_offset is None:
+            return
+        x = event.x_root - self._drag_offset[0]
+        y = event.y_root - self._drag_offset[1]
+        self.root.geometry(f"+{x}+{y}")
+
+    def _end_drag(self, _event) -> None:
+        if self._drag_offset is None:
+            return
+        self._drag_offset = None
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self._saved_position = (x, y)
+        if self._on_position_changed:
+            self._on_position_changed(x, y)
 
     def _show_feature(self, feature_id: str) -> None:
         if feature_id == self._current_feature_id:

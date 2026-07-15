@@ -39,6 +39,8 @@ class MinimapWindow:
         self._on_position_changed = on_position_changed
         self._drag_offset: Optional[tuple[int, int]] = None
         self._renderer = renderer or MapRenderer()
+        self._render_job: Optional[str] = None
+        self._render_delay_ms = 1200
 
     @property
     def is_visible(self) -> bool:
@@ -72,6 +74,16 @@ class MinimapWindow:
             self._follow_steam_id = follow_steam_id
         if tracked_event_id is not None:
             self._tracked_event_id = tracked_event_id
+        if self.is_visible and self._path:
+            self._schedule_apply_image()
+
+    def _schedule_apply_image(self) -> None:
+        if self._render_job:
+            self._root.after_cancel(self._render_job)
+        self._render_job = self._root.after(self._render_delay_ms, self._run_apply_image)
+
+    def _run_apply_image(self) -> None:
+        self._render_job = None
         if self.is_visible and self._path:
             self._apply_image(self._path)
 
@@ -124,12 +136,18 @@ class MinimapWindow:
     def hide(self) -> None:
         self._visible = False
         self._drag_offset = None
+        if self._render_job:
+            self._root.after_cancel(self._render_job)
+            self._render_job = None
         if self._win and self._win.winfo_exists():
             self._win.withdraw()
 
     def destroy(self) -> None:
         self._visible = False
         self._drag_offset = None
+        if self._render_job:
+            self._root.after_cancel(self._render_job)
+            self._render_job = None
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         self._win = None

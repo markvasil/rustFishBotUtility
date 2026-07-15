@@ -7,10 +7,11 @@ Rust Utility Overlay — оверлей поверх игры Rust с полез
 
 from __future__ import annotations
 
+import ctypes
 import sys
-
 import keyboard
 
+from features.click_scripts.widget import ClickScriptsFeature
 from features.craft_calculator.widget import CraftCalculatorFeature
 from features.crosshair.window import CrosshairWindow
 from features.electricity.widget import ElectricityFeature
@@ -21,8 +22,11 @@ from features.raid_calculator.widget import RaidCalculatorFeature
 from features.resource_machines.widget import ResourceMachinesFeature
 from features.rustplus_hub.widget import RustPlusHubFeature
 from features.timers.widget import TimersFeature
+from overlay.splash import StartupSplash
+from overlay.startup_sound import play_soft_pop
 from overlay.window import OverlayWindow
 from services.app.autostart import is_autostart_enabled, set_autostart
+from services.app.lifecycle import force_exit
 from services.app.single_instance import ensure_single_instance
 from services.app.system_tray import SystemTray
 from services.rustplus.service import RustPlusService
@@ -30,7 +34,18 @@ from services.timer_manager import TimerManager
 from storage.session import SessionStore
 
 
+def _enable_dpi_awareness() -> None:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def main() -> None:
+    _enable_dpi_awareness()
     if not ensure_single_instance():
         print("Rust Utility Overlay уже запущен.")
         sys.exit(0)
@@ -38,7 +53,22 @@ def main() -> None:
     session = SessionStore()
     rustplus = RustPlusService()
 
-    overlay = OverlayWindow([])
+    overlay_pos = session.get_feature("_overlay")
+    initial_overlay_pos = None
+    if overlay_pos.get("x") is not None and overlay_pos.get("y") is not None:
+        initial_overlay_pos = (int(overlay_pos["x"]), int(overlay_pos["y"]))
+
+    overlay = OverlayWindow(
+        [],
+        initial_position=initial_overlay_pos,
+        on_position_changed=lambda x, y: session.update_feature("_overlay", x=x, y=y),
+    )
+
+    splash = StartupSplash(overlay.root)
+    splash.show("Запуск оверлея…")
+    splash.set_progress(0.12)
+
+    splash.set_status("Прицел и таймеры…")
     crosshair = CrosshairWindow(overlay.root, rustplus.store.get_settings)
     timer_manager = TimerManager(
         overlay.root,
@@ -46,7 +76,9 @@ def main() -> None:
     )
     timer_manager_ref = timer_manager
     timer_manager.load(session.get_feature("timers").get("active", []))
+    splash.set_progress(0.28)
 
+    splash.set_status("Загрузка модулей…")
     features = [
         RustPlusHubFeature(rustplus, overlay, crosshair),
         RaidCalculatorFeature(session),
@@ -55,12 +87,19 @@ def main() -> None:
         ResourceMachinesFeature(),
         NotesFeature(session),
         TimersFeature(session, timer_manager),
-        GeneticsFeature(),
+        GeneticsFeature(session=session),
         ElectricityFeature(),
+        ClickScriptsFeature(session, overlay),
     ]
+    splash.set_progress(0.62)
 
+    splash.set_status("Сборка интерфейса…")
     overlay.set_features(features)
+    splash.set_progress(0.78)
+
+    splash.set_status("Rust+ сервис…")
     rustplus.start()
+    splash.set_progress(0.9)
 
     settings = rustplus.store.get_settings()
     if settings.autostart != is_autostart_enabled():
@@ -76,17 +115,51 @@ def main() -> None:
         if shutting_down:
             return
         shutting_down = True
+
         if tray:
-            tray.stop()
+            try:
+                tray.stop()
+            except Exception:
+                pass
             tray = None
+
         for feature in features:
-            feature.on_shutdown()
-        crosshair.destroy()
-        session.update_feature("timers", active=timer_manager.dump())
-        timer_manager.stop()
-        rustplus.stop()
-        keyboard.unhook_all()
-        overlay.quit()
+            try:
+                feature.on_shutdown()
+            except Exception:
+                pass
+
+        try:
+            crosshair.destroy()
+        except Exception:
+            pass
+
+        try:
+            session.update_feature("timers", active=timer_manager.dump())
+        except Exception:
+            pass
+
+        try:
+            timer_manager.stop()
+        except Exception:
+            pass
+
+        try:
+            rustplus.stop()
+        except Exception:
+            pass
+
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+
+        try:
+            overlay.destroy()
+        except Exception:
+            pass
+
+        force_exit(0)
 
     def on_toggle() -> None:
         overlay.root.after(0, overlay.toggle)
@@ -108,6 +181,11 @@ def main() -> None:
         except Exception:
             tray = None
 
+    splash.set_status("Готово")
+    splash.set_progress(1.0)
+    splash.close()
+    play_soft_pop()
+
     print("Rust Utility Overlay запущен.")
     print("F5 — показать/скрыть оверлей.")
     print("F6 — выход из приложения.")
@@ -115,16 +193,8 @@ def main() -> None:
     try:
         overlay.run()
     finally:
-        if tray:
-            tray.stop()
-        for feature in features:
-            feature.on_shutdown()
-        crosshair.destroy()
-        session.update_feature("timers", active=timer_manager.dump())
-        timer_manager.stop()
-        rustplus.stop()
-        keyboard.unhook_all()
-        overlay.destroy()
+        if not shutting_down:
+            shutdown()
 
 
 def _on_timer_done(timer, overlay, session, timer_manager) -> None:

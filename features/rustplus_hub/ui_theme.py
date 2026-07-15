@@ -195,8 +195,36 @@ def status_pill(parent, key: str) -> ctk.CTkLabel:
     )
 
 
+def settings_group(parent, title: str, subtitle: str) -> ctk.CTkFrame:
+    """Карточка-группа для вкладки настроек."""
+    frame = card(parent)
+    frame.pack(fill="x", padx=4, pady=(0, 10))
+    ctk.CTkLabel(
+        frame,
+        text=title,
+        font=ctk.CTkFont(size=12, weight="bold"),
+        text_color=Theme.TEXT,
+        anchor="w",
+    ).pack(anchor="w", padx=12, pady=(12, 0))
+    hint_label(frame, subtitle)
+    body = ctk.CTkFrame(frame, fg_color="transparent")
+    body.pack(fill="x", padx=12, pady=(4, 12))
+    return body
+
+
+def field_label(parent, text: str) -> None:
+    ctk.CTkLabel(
+        parent,
+        text=text,
+        font=ctk.CTkFont(size=10, weight="bold"),
+        text_color=Theme.MUTED,
+        anchor="w",
+    ).pack(anchor="w", pady=(0, 4))
+
+
 def set_pill(label: ctk.CTkLabel, key: str, ok: bool, detail: str = "") -> None:
     mark = "●" if ok else "○"
     color = Theme.SUCCESS if ok else Theme.DIM
     suffix = f" {detail}" if detail else ""
     label.configure(text=f"{mark} {key}{suffix}", text_color=color)
+

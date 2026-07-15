@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
+icon_path = Path(SPECPATH) / "assets" / "app_icon.ico"
 
 hiddenimports = collect_submodules("customtkinter")
 hiddenimports += [
@@ -11,6 +14,19 @@ hiddenimports += [
     "win32api",
     "win32con",
     "winsound",
+    "numpy",
+    "mss",
+    "scipy",
+    "scipy.special.cython_special",
+    "websockets",
+    "rustplus",
+    "rustplus.remote.camera.camera_constants",
+    "rustplus.structs",
+    "rustplus.structs.rust_marker",
+    "rustplus.structs.rust_team_info",
+    "rustplus.structs.util",
+    "rustplus.utils.grab_items",
+    "rustplus.utils.utils",
 ]
 
 datas = collect_data_files("customtkinter")
@@ -24,7 +40,15 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch",
+        "matplotlib",
+        "sympy",
+        "pytest",
+        "IPython",
+        "notebook",
+        "tkinter.test",
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -53,5 +77,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=str(icon_path) if icon_path.exists() else None,
 )

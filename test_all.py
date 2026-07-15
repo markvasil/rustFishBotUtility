@@ -43,6 +43,181 @@ def test_genetics():
     assert normalize_genes("gy") == "GYXXXX"
 
 
+def test_genetics_breeding_planner():
+    from features.genetics.breeding_planner import (
+        find_breeding_paths,
+        format_gene_profile,
+        gene_counts,
+        matches_gene_counts,
+        parse_target_counts,
+        validate_path,
+    )
+
+    counts, err = parse_target_counts({"G": 3, "Y": 3, "H": 0, "W": 0, "X": 0})
+    assert err is None
+    assert format_gene_profile(counts) == "3G 3Y"
+
+    direct, err = find_breeding_paths(["YYGYGG"], counts, max_steps=2, max_paths=3)
+    assert err is None
+    assert direct and direct[0].step_count == 0
+    assert matches_gene_counts(direct[0].final, counts)
+
+    pool = ["WYGXGH", "HGGWYX", "YGHWWH"]
+    target_counts = gene_counts("YGGWWH")
+    paths, err = find_breeding_paths(pool, target_counts, max_steps=3, max_paths=3)
+    assert err is None
+    assert paths and paths[0].step_count >= 1
+    assert matches_gene_counts(paths[0].final, target_counts)
+    for path in paths:
+        assert validate_path(pool, path.steps)
+
+    user_pool = ["GGYXYH", "HGWGYW", "XHHGGX"]
+    user_target = {"G": 3, "Y": 2, "H": 1, "W": 0, "X": 0}
+    user_paths, user_err = find_breeding_paths(
+        user_pool,
+        user_target,
+        max_steps=2,
+        max_paths=3,
+    )
+    assert not user_paths
+    assert user_err
+
+    missing, err = find_breeding_paths(["GGGGGG", "YYYYYY"], counts, max_steps=2, max_paths=3)
+    assert not missing
+    assert err
+
+
+def test_genetics_calibration():
+    from features.genetics.calibration import (
+        RegionCalibration,
+        load_calibrations,
+        profile_key,
+        save_calibrations,
+    )
+
+    data: dict = {}
+    cal = RegionCalibration(
+        dx=0,
+        dy=0,
+        slots=((10, 0), (5, 0), (0, 0), (0, 0), (0, 0), (0, 0)),
+    )
+    save_calibrations(data, "1440p", {"inventory": cal})
+    loaded = load_calibrations(data, "1440p", ["inventory"])
+    assert loaded["inventory"].slots[0] == (10, 0)
+    assert loaded["inventory"].slots[1] == (5, 0)
+    assert profile_key(None, "2K") == "1440p"
+
+
+def test_genetics_scanner():
+    import numpy as np
+    from PIL import Image
+
+    from features.genetics.scanner import (
+        RESOLUTION_PROFILES,
+        SCAN_REGIONS,
+        classify_gene_slot,
+        get_regions_for_frame,
+        normalize_capture_frame,
+        resolve_profile,
+    )
+
+    green = np.full((48, 40, 3), (50, 170, 70), dtype=np.uint8)
+    yellow = np.full((48, 40, 3), (220, 180, 40), dtype=np.uint8)
+    assert classify_gene_slot(green) is None
+    assert classify_gene_slot(yellow) is None
+
+    from features.genetics.calibration import RegionCalibration
+    from features.genetics.scanner import calibrated_slot_rects
+
+    region = SCAN_REGIONS["inventory"]
+    cal = RegionCalibration(
+        0,
+        0,
+        ((0, 0), (20, 0), (40, 0), (60, 0), (80, 0), (100, 0)),
+    )
+    rects = calibrated_slot_rects(2560, 1440, region, cal)
+    widths = [rect[2] - rect[0] for rect in rects]
+    assert all(width == widths[0] for width in widths)
+    assert widths[0] >= 20
+
+    frame = Image.new("RGB", (1920, 1080), (20, 20, 20))
+    assert normalize_capture_frame(frame).size == (1920, 1080)
+    assert "planter" in SCAN_REGIONS
+
+    assert resolve_profile(1920, 1080).id == "1080p"
+    assert resolve_profile(2560, 1440).id == "1440p"
+    assert resolve_profile(2560, 1440, "1080p").id == "1080p"
+    assert len(get_regions_for_frame(2560, 1440)) == len(RESOLUTION_PROFILES["1440p"].regions)
+
+    import re
+
+    import features.genetics.scanner as scanner_module
+
+    from features.genetics.scanner import scan_frame_for_genes
+
+    screenshot_dir = Path(__file__).resolve().parent / "screenshot"
+    expected_overrides = {"23.jpg": "WYGXGH"}
+
+    def expected_genes_from_filename(filename: str) -> str | None:
+        if filename in expected_overrides:
+            return expected_overrides[filename]
+        match = re.match(r"^([WYGHX]+)(?:_\d+)?$", Path(filename).stem)
+        return match.group(1) if match else None
+
+    cases: list[tuple[Path, str]] = []
+    for path in sorted(screenshot_dir.glob("*.jpg")):
+        expected = expected_genes_from_filename(path.name)
+        if expected and len(expected) == 6:
+            cases.append((path, expected))
+    assert cases, "Нет эталонных скриншотов в screenshot/"
+
+    region = get_regions_for_frame(2560, 1440)["inventory"]
+    original_detect = scanner_module._detect_gene_row_centers
+
+    for path, expected in cases:
+        frame = Image.open(path).convert("RGB")
+        assert frame.size == (2560, 1440), f"{path.name}: ожидается 2560×1440"
+
+        genes = scan_frame_for_genes(
+            frame,
+            region,
+            profile_id="1440p",
+            calibration=RegionCalibration(),
+        )
+        assert genes == expected, f"{path.name} auto: expected {expected}, got {genes}"
+
+        genes = scan_frame_for_genes(
+            frame,
+            region,
+            profile_id="1440p",
+            calibration=None,
+        )
+        assert genes == expected, f"{path.name} default: expected {expected}, got {genes}"
+
+        try:
+            scanner_module._detect_gene_row_centers = lambda _frame, _region: None
+            genes = scan_frame_for_genes(
+                frame,
+                region,
+                profile_id="1440p",
+                calibration=RegionCalibration(),
+            )
+            assert genes == expected, f"{path.name} fallback: expected {expected}, got {genes}"
+        finally:
+            scanner_module._detect_gene_row_centers = original_detect
+
+        for attempt in range(2):
+            genes = scan_frame_for_genes(
+                frame,
+                region,
+                profile_id="1440p",
+                calibration=RegionCalibration(),
+            )
+            assert genes == expected, (
+                f"{path.name} repeat {attempt + 1}: expected {expected}, got {genes}"
+            )
+
+
 def test_electricity():
     s = calculate_electricity({"solar": 2}, {"turret": 3}, {"large": 1})
     assert s.total_generation == 40
@@ -71,6 +246,9 @@ if __name__ == "__main__":
     test_furnace_multi()
     test_machine()
     test_genetics()
+    test_genetics_breeding_planner()
+    test_genetics_calibration()
+    test_genetics_scanner()
     test_electricity()
     test_session()
     test_furnace_from_refined()

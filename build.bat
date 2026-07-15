@@ -20,8 +20,16 @@ if errorlevel 1 (
 )
 
 echo.
-echo Готово: dist\RustUtilityOverlay.exe
-echo Можно отправить друзьям этот один файл.
+echo Копирование runtime (Node + Rust+ CLI)...
+if exist dist\runtime rmdir /s /q dist\runtime
+xcopy /E /I /Y /Q runtime dist\runtime >nul
+
+echo.
+echo Готово:
+echo   dist\RustUtilityOverlay.exe
+echo   dist\runtime\
+echo.
+echo Для друзей: заархивируйте папку dist\ целиком.
 echo Данные сессии сохраняются в %%APPDATA%%\RustUtilityOverlay\
 echo.
 pause

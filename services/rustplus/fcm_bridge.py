@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app_paths import get_fcm_config_path, get_runtime_dir, get_rustplus_dir
+from services.app.lifecycle import terminate_process
 from services.rustplus.event_bus import EventBus, EventType
 
 
-from storage.rustplus_store import RustPlusStore
+from storage.rustplus_store import RustPlusStore, normalize_device_type
 
 
 class FCMBridge:
@@ -250,17 +251,17 @@ class FCMBridge:
 
     def stop_listen(self) -> None:
         self._running = False
-        if self._process and self._process.poll() is None:
-            try:
-                self._process.terminate()
-                self._process.wait(timeout=5)
-            except Exception:
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
+        terminate_process(self._process)
         self._process = None
         self._bus.emit(EventType.STATUS, message="FCM listener остановлен")
+
+    def stop_register(self) -> None:
+        terminate_process(self._register_process)
+        self._register_process = None
+
+    def stop_all(self) -> None:
+        self.stop_listen()
+        self.stop_register()
 
     def _read_output(self) -> None:
         if not self._process or not self._process.stdout:
@@ -405,23 +406,36 @@ class FCMBridge:
             entity_id = int(body.get("entityId", body.get("entity_id", 0)))
         except (TypeError, ValueError):
             return
+        if entity_id <= 0:
+            return
 
-        raw_type = str(body.get("entityType", body.get("type", "smart_switch"))).lower()
-        if "switch" in raw_type:
-            device_type = "smart_switch"
-        elif "alarm" in raw_type:
-            device_type = "smart_alarm"
-        elif "storage" in raw_type or "monitor" in raw_type:
-            device_type = "storage_monitor"
-        else:
-            device_type = raw_type or "smart_switch"
+        device_type = normalize_device_type(body.get("entityType", body.get("type", "smart_switch")))
+        name = str(body.get("name", body.get("entityName", "Device")))
 
         payload = {
             "entity_id": entity_id,
-            "name": str(body.get("name", body.get("entityName", "Device"))),
+            "name": name,
             "device_type": device_type,
         }
         self._log_pairing("entity", payload)
+
+        # Пишем в store сразу (не только через очередь событий) —
+        # иначе при сбое handler'а устройство теряется, а в pairing.log уже есть.
+        if self._store is not None:
+            server_id = self._store.get_active_server_id()
+            if not server_id and self._store.list_servers():
+                server_id = self._store.list_servers()[-1].id
+            if server_id:
+                try:
+                    self._store.add_device(
+                        server_id=server_id,
+                        entity_id=entity_id,
+                        name=name,
+                        device_type=device_type,
+                    )
+                except Exception:
+                    pass
+
         self._bus.emit(EventType.DEVICE_PAIRED, **payload)
 
     @staticmethod

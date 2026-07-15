@@ -16,16 +16,28 @@ from features.rustplus_hub.ui_theme import (
     hint_label,
     panel,
     section_header,
+    settings_group,
     set_pill,
     status_pill,
     step_card,
+    field_label,
 )
 from features.rustplus_hub.map_window import MapWindow
 from features.rustplus_hub.minimap_window import MinimapWindow
+from overlay.key_capture import KeyCapture
+from overlay.hotkey_util import hotkey_label
 from services.rustplus.event_bus import EventType, RustPlusEvent
-from services.rustplus.live_format import filter_vendors, upkeep_hours_left
+from services.rustplus.live_format import (
+    build_vendor_item_catalog,
+    classify_vendor,
+    collect_item_offers,
+    filter_vendor_catalog_items,
+    filter_vendors_by_kind,
+    upkeep_hours_left,
+    vendors_state_signature,
+)
 from services.rustplus.service import RustPlusService
-from storage.rustplus_store import AlertSettings, PairedServer
+from storage.rustplus_store import AlertSettings, MapLayerSettings, PairedServer
 
 if TYPE_CHECKING:
     from features.crosshair.window import CrosshairWindow
@@ -38,6 +50,12 @@ class RustPlusHubFeature(Feature):
     LIVE_SCROLL_HEIGHT = 380
     SERVER_ROW_HEIGHT = 54
     SERVERS_MAX_VISIBLE = 2
+    VENDOR_PAGE_SIZE = 20
+    VENDOR_ITEM_PAGE_SIZE = 30
+    VENDOR_OFFER_PAGE_SIZE = 20
+    MAX_VENDOR_ORDERS = 3
+    VENDOR_REFRESH_DEBOUNCE_MS = 500
+    MAP_SYNC_DEBOUNCE_MS = 900
 
     def __init__(
         self,
@@ -50,6 +68,7 @@ class RustPlusHubFeature(Feature):
         self._overlay = overlay
         self._crosshair = crosshair
         self._root = overlay.root
+        self._key_capture = KeyCapture(overlay.root)
         self._status_label: Optional[ctk.CTkLabel] = None
         self._status_pills: Dict[str, ctk.CTkLabel] = {}
         self._manual_body: Optional[ctk.CTkFrame] = None
@@ -70,9 +89,24 @@ class RustPlusHubFeature(Feature):
         self._vendors_frame: Optional[ctk.CTkFrame] = None
         self._devices_frame: Optional[ctk.CTkFrame] = None
         self._vendor_search: Optional[ctk.StringVar] = None
+        self._vendor_kind_var = ctk.StringVar(value="all")
+        self._vendors_count_label: Optional[ctk.CTkLabel] = None
+        self._vendor_page_label: Optional[ctk.CTkLabel] = None
+        self._vendor_page = 0
+        self._vendor_view_mode = "catalog"
+        self._vendor_selected_item_id: Optional[int] = None
+        self._vendor_catalog_cache: List[Dict[str, Any]] = []
+        self._vendor_filtered_catalog: List[Dict[str, Any]] = []
+        self._vendor_offers_cache: List[Dict[str, Any]] = []
+        self._vendors_render_job: Optional[str] = None
+        self._map_sync_job: Optional[str] = None
+        self._vendors_signature: Optional[str] = None
+        self._map_overlay_signature: Optional[str] = None
         self._map_preview: Optional[ctk.CTkLabel] = None
         self._map_image_ref: Optional[ctk.CTkImage] = None
         self._vendors_cache: List[Dict[str, Any]] = []
+        self._vendor_icon_refs: List[ctk.CTkImage] = []
+        self._vendor_icon_labels: Dict[int, ctk.CTkLabel] = {}
         self._device_states: Dict[int, Dict[str, Any]] = {}
         self._server_time: str = ""
         self._map_path: Optional[str] = None
@@ -145,6 +179,7 @@ class RustPlusHubFeature(Feature):
             segmented_button_unselected_color=Theme.CARD_ALT,
             segmented_button_unselected_hover_color=Theme.BORDER,
             text_color=Theme.TEXT,
+            command=self._on_tab_changed,
         )
         self._tabs.pack(fill="x", padx=12, pady=(0, 8))
 
@@ -366,23 +401,69 @@ class RustPlusHubFeature(Feature):
         ).pack(anchor="w", padx=10, pady=10)
 
     def _build_vendors_section(self, parent: ctk.CTkScrollableFrame) -> None:
-        self._section_title(parent, "Магазины", "Поиск по названию или item id")
+        self._section_title(parent, "Магазины", "Выберите товар — покажем лавки, цену и остаток")
+        filter_row = ctk.CTkFrame(parent, fg_color="transparent")
+        filter_row.pack(fill="x", padx=4, pady=(0, 6))
+        for kind, label in [("all", "Все"), ("player", "Игроки"), ("monument", "Монументы")]:
+            btn_secondary(
+                filter_row,
+                label,
+                lambda k=kind: self._set_vendor_kind(k),
+                width=88,
+                height=28,
+            ).pack(side="left", padx=(0, 4))
+        self._vendors_count_label = ctk.CTkLabel(
+            filter_row,
+            text="",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+        )
+        self._vendors_count_label.pack(side="right", padx=(8, 0))
+
         search_row = ctk.CTkFrame(parent, fg_color="transparent")
         search_row.pack(fill="x", padx=4, pady=(0, 6))
         self._vendor_search = ctk.StringVar()
         entry = ctk.CTkEntry(
             search_row,
             textvariable=self._vendor_search,
-            placeholder_text="Название или item id",
+            placeholder_text="Поиск товара",
             height=30,
             corner_radius=8,
         )
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        btn_secondary(search_row, "Найти", self._search_vendors, width=72, height=30).pack(side="left")
+        entry.bind("<Return>", lambda _e: self._search_vendor_items())
+        entry.bind("<KeyRelease>", lambda _e: self._on_vendor_item_search_change())
+        btn_secondary(search_row, "Найти", self._search_vendor_items, width=72, height=30).pack(side="left")
+
+        nav_row = ctk.CTkFrame(parent, fg_color="transparent")
+        nav_row.pack(fill="x", padx=4, pady=(0, 6))
+        self._vendor_prev_btn = btn_secondary(nav_row, "←", self._vendor_prev_page, width=36, height=28)
+        self._vendor_back_btn = btn_secondary(
+            nav_row, "← Товары", self._show_vendor_catalog, width=88, height=28,
+        )
+        self._vendor_prev_btn.pack(side="left")
+        self._vendor_page_label = ctk.CTkLabel(
+            nav_row,
+            text="стр. 1/1",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+        )
+        self._vendor_page_label.pack(side="left", padx=8)
+        btn_secondary(nav_row, "→", self._vendor_next_page, width=36, height=28).pack(side="left")
+
+        self._vendor_selected_label = ctk.CTkLabel(
+            parent,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=Theme.TEXT,
+            anchor="w",
+        )
+        self._vendor_selected_label.pack(fill="x", padx=8, pady=(0, 4))
+
         self._vendors_frame = panel(parent)
         self._vendors_frame.pack(fill="x", padx=4, pady=(0, 8))
         ctk.CTkLabel(
-            self._vendors_frame, text="Нет магазинов", text_color=Theme.DIM,
+            self._vendors_frame, text="Нет товаров в наличии", text_color=Theme.DIM,
         ).pack(anchor="w", padx=10, pady=10)
 
     def _build_devices_section(self, parent: ctk.CTkScrollableFrame) -> None:
@@ -391,11 +472,26 @@ class RustPlusHubFeature(Feature):
             "Умные устройства",
             "Switch, Alarm, Storage Monitor",
             action_text="Обновить",
-            action_command=lambda: self._service.refresh_device_states(),
+            action_command=self._refresh_devices_action,
         )
         self._devices_frame = panel(parent)
         self._devices_frame.pack(fill="x", padx=4, pady=(0, 8))
         self._refresh_devices_panel()
+
+    def _refresh_devices_action(self) -> None:
+        """Подтянуть пропущенные Pair из лога + опросить состояние."""
+        server = self._service.get_active_server() or self._service.connection.connected_server
+        server_id = server.id if server else None
+        added = self._service.store.sync_devices_from_pairing_log(server_id)
+        if self._service.connection.is_connected:
+            self._service.connection.refresh_devices()
+            self._service.refresh_device_states()
+        self._refresh_devices_panel()
+        self._refresh_groups_label()
+        if added:
+            self._set_status(f"Добавлено устройств из pairing: {added}")
+        else:
+            self._set_status("Устройства обновлены")
 
     def _build_cameras_section(self, parent: ctk.CTkScrollableFrame) -> None:
         self._section_title(parent, "Камеры", "CCTV / PTZ — DOME1, OILRIG1L1…")
@@ -426,6 +522,44 @@ class RustPlusHubFeature(Feature):
         btn_secondary(row, "Загрузить", lambda: self._service.fetch_map(), width=100, height=30).pack(side="left", padx=(0, 4))
         btn_primary(row, "Крупно", self._open_map_window, width=90, height=30).pack(side="left", padx=(0, 4))
         btn_secondary(row, "Миникарта", self._toggle_minimap, width=100, height=30).pack(side="left")
+
+        layers = self._service.store.get_map_layers()
+        self._map_layer_vars = {
+            "monuments": ctk.BooleanVar(value=layers.monuments),
+            "players": ctk.BooleanVar(value=layers.players),
+            "shops": ctk.BooleanVar(value=layers.shops),
+        }
+        layers_card = panel(parent)
+        layers_card.pack(fill="x", padx=4, pady=(0, 8))
+        field_label(layers_card, "Слои на карте")
+        layer_hints = {
+            "monuments": "Монументы и POI на базовой карте",
+            "players": "Позиции команды на карте и оверлее",
+            "shops": "Вендинги и бродячие торговцы",
+        }
+        for key, label in [
+            ("monuments", "Монументы"),
+            ("players", "Игроки"),
+            ("shops", "Магазины"),
+        ]:
+            layer_row = ctk.CTkFrame(layers_card, fg_color="transparent")
+            layer_row.pack(fill="x", padx=10, pady=2)
+            ctk.CTkCheckBox(
+                layer_row,
+                text=label,
+                variable=self._map_layer_vars[key],
+                width=110,
+                command=self._save_map_layers,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                layer_row,
+                text=layer_hints[key],
+                font=ctk.CTkFont(size=10),
+                text_color=Theme.DIM,
+                anchor="w",
+            ).pack(side="left", padx=(8, 0))
+        hint_label(layers_card, "Слои применяются сразу к миникарте и большой карте.")
+
         self._map_preview = ctk.CTkLabel(
             parent,
             text="Нажмите «Загрузить»",
@@ -438,9 +572,11 @@ class RustPlusHubFeature(Feature):
         self._map_preview.bind("<Button-1>", lambda _e: self._open_map_window())
 
     def _build_settings_section(self, parent: ctk.CTkScrollableFrame) -> None:
-        self._section_title(parent, "Настройки", "Алерты, карта, устройства, прицел")
-        frame = card(parent)
-        frame.pack(fill="x", padx=4, pady=(0, 8))
+        self._section_title(
+            parent,
+            "Настройки",
+            "Сгруппировано по смыслу — меняйте только нужный блок",
+        )
 
         alerts = self._service.store.get_alert_settings()
         self._alert_vars = {
@@ -449,89 +585,269 @@ class RustPlusHubFeature(Feature):
             "shop": ctk.BooleanVar(value=alerts.shop),
             "alarm": ctk.BooleanVar(value=alerts.alarm),
         }
-        row = ctk.CTkFrame(frame, fg_color="transparent")
-        row.pack(fill="x", padx=12, pady=8)
-        ctk.CTkLabel(row, text="Алерты на карте и в чате", font=ctk.CTkFont(size=10, weight="bold"), text_color=Theme.MUTED).pack(anchor="w", pady=(0, 6))
+        alerts_body = settings_group(
+            parent,
+            "Уведомления и карта",
+            "Снятая галочка убирает toast и алерты (магазины на карте — во вкладке «Карта»).",
+        )
+        alert_hints = {
+            "cargo": "Карго, верт, chinook — события и алерты",
+            "death": "Смерти тиммейтов + маркеры на карте",
+            "shop": "Алерты о выгодных сделках и изменениях шопов",
+            "alarm": "Smart Alarm (FCM и в игре)",
+        }
         for key, label in [
             ("cargo", "Карго"), ("death", "Смерть"), ("shop", "Магазины"), ("alarm", "Alarm"),
         ]:
+            row = ctk.CTkFrame(alerts_body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
             ctk.CTkCheckBox(
-                row, text=label, variable=self._alert_vars[key], width=90,
+                row,
+                text=label,
+                variable=self._alert_vars[key],
+                width=100,
                 command=self._save_alert_settings,
-            ).pack(side="left", padx=(0, 6))
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=alert_hints[key],
+                font=ctk.CTkFont(size=10),
+                text_color=Theme.DIM,
+                anchor="w",
+            ).pack(side="left", padx=(8, 0))
 
         settings = self._service.store.get_settings()
-        row2 = ctk.CTkFrame(frame, fg_color="transparent")
-        row2.pack(fill="x", padx=8, pady=4)
+        app_body = settings_group(
+            parent,
+            "Приложение",
+            "Фоновая работа и команды в team chat от вашего ника.",
+        )
         self._autostart_var = ctk.BooleanVar(value=settings.autostart)
         self._tray_var = ctk.BooleanVar(value=settings.minimize_to_tray)
         self._chat_cmd_var = ctk.BooleanVar(value=settings.chat_commands_enabled)
-        ctk.CTkCheckBox(row2, text="Автозапуск", variable=self._autostart_var, command=self._save_app_settings).pack(side="left", padx=(0, 8))
-        ctk.CTkCheckBox(row2, text="Tray 24/7", variable=self._tray_var, command=self._save_app_settings).pack(side="left", padx=(0, 8))
-        ctk.CTkCheckBox(row2, text="Чат-команды", variable=self._chat_cmd_var, command=self._save_app_settings).pack(side="left")
+        for text, var, tip in [
+            ("Запускать с Windows", self._autostart_var, "Оверлей стартует при входе в систему"),
+            ("Сворачивать в tray", self._tray_var, "F6 — выход; иконка в трее — показать снова"),
+            ("Чат-команды", self._chat_cmd_var, "!on / !off / !toggle / !leader / !upkeep / !mark"),
+        ]:
+            row = ctk.CTkFrame(app_body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkCheckBox(
+                row, text=text, variable=var, command=self._save_app_settings,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row, text=tip, font=ctk.CTkFont(size=10), text_color=Theme.DIM, anchor="w",
+            ).pack(side="left", padx=(8, 0))
 
-        row3 = ctk.CTkFrame(frame, fg_color="transparent")
-        row3.pack(fill="x", padx=8, pady=4)
-        ctk.CTkLabel(row3, text="Follow:", font=ctk.CTkFont(size=10)).pack(side="left")
+        map_body = settings_group(
+            parent,
+            "Карта",
+            "Следование камеры и очистка маркеров смерти.",
+        )
+        field_label(map_body, "Smart Follow — Steam ID игрока")
+        follow_row = ctk.CTkFrame(map_body, fg_color="transparent")
+        follow_row.pack(fill="x", pady=(0, 6))
         self._follow_var = ctk.StringVar(value="")
-        ctk.CTkEntry(row3, textvariable=self._follow_var, width=120, placeholder_text="Steam ID").pack(side="left", padx=6)
-        ctk.CTkButton(row3, text="OK", width=40, command=self._save_follow).pack(side="left")
+        ctk.CTkEntry(
+            follow_row,
+            textvariable=self._follow_var,
+            width=200,
+            height=30,
+            placeholder_text="76561198…",
+            corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(follow_row, "Применить", self._save_follow, width=90, height=30).pack(side="left")
+        hint_label(map_body, "Миникарта и большая карта центрируются на этом игроке.")
+        btn_secondary(
+            map_body, "Очистить маркеры смерти", self._clear_deaths, width=180, height=28,
+        ).pack(anchor="w", pady=(4, 0))
 
-        row4 = ctk.CTkFrame(frame, fg_color="transparent")
-        row4.pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(row4, text="Экспорт устройств", width=120, fg_color="#2a3142", command=self._export_devices).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(row4, text="Импорт", width=70, fg_color="#2a3142", command=self._import_devices_dialog).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(row4, text="Очистить смерти", width=110, fg_color="#3d4659", command=self._clear_deaths).pack(side="left")
+        devices_body = settings_group(
+            parent,
+            "Устройства и горячие клавиши",
+            "Выберите Switch галочками — видно, что попадёт в группу. Hotkey на один Switch или на группу.",
+        )
+        share_row = ctk.CTkFrame(devices_body, fg_color="transparent")
+        share_row.pack(fill="x", pady=(0, 8))
+        btn_secondary(share_row, "Экспорт в буфер", self._export_devices, width=120, height=28).pack(side="left", padx=(0, 6))
+        btn_secondary(share_row, "Импорт", self._import_devices_dialog, width=80, height=28).pack(side="left")
+        hint_label(devices_body, "В чате: !share и !import — или вставьте base64 вручную.")
 
-        row5 = ctk.CTkFrame(frame, fg_color="transparent")
-        row5.pack(fill="x", padx=8, pady=4)
-        self._profit_item_var = ctk.StringVar(value="")
-        ctk.CTkEntry(row5, textvariable=self._profit_item_var, width=80, placeholder_text="item id").pack(side="left")
-        ctk.CTkButton(row5, text="Profit", width=60, fg_color="#2a3142", command=self._show_profit).pack(side="left", padx=6)
-        self._profit_label = ctk.CTkLabel(row5, text="", font=ctk.CTkFont(size=10), text_color="#8b93a7")
-        self._profit_label.pack(side="left", fill="x", expand=True)
+        field_label(devices_body, "Выбор Switch")
+        pick_actions = ctk.CTkFrame(devices_body, fg_color="transparent")
+        pick_actions.pack(fill="x", pady=(0, 4))
+        btn_secondary(pick_actions, "Все", self._select_all_switches, width=60, height=26).pack(side="left", padx=(0, 6))
+        btn_secondary(pick_actions, "Сбросить", self._clear_switch_selection, width=80, height=26).pack(side="left")
+        self._switch_pick_frame = ctk.CTkScrollableFrame(
+            devices_body, fg_color=Theme.CARD_ALT, height=110, corner_radius=8,
+        )
+        self._switch_pick_frame.pack(fill="x", pady=(0, 4))
+        self._selection_summary = ctk.CTkLabel(
+            devices_body,
+            text="Ничего не выбрано",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=480,
+        )
+        self._selection_summary.pack(fill="x", pady=(0, 8))
 
-        row6 = ctk.CTkFrame(frame, fg_color="transparent")
-        row6.pack(fill="x", padx=8, pady=4)
+        field_label(devices_body, "Группа из выбранных")
+        group_row = ctk.CTkFrame(devices_body, fg_color="transparent")
+        group_row.pack(fill="x", pady=(0, 8))
         self._group_name_var = ctk.StringVar(value="Группа")
-        self._hotkey_var = ctk.StringVar(value="f7")
-        ctk.CTkEntry(row6, textvariable=self._group_name_var, width=90, placeholder_text="Группа").pack(side="left")
-        ctk.CTkButton(row6, text="+ все Switch", width=90, fg_color="#2a3142", command=self._create_switch_group).pack(side="left", padx=4)
-        ctk.CTkEntry(row6, textvariable=self._hotkey_var, width=50, placeholder_text="f7").pack(side="left", padx=4)
-        ctk.CTkButton(row6, text="Hotkey", width=70, fg_color="#c45c26", command=self._bind_group_hotkey).pack(side="left")
-        self._groups_label = ctk.CTkLabel(frame, text="", font=ctk.CTkFont(size=10), text_color="#6b7280", anchor="w")
-        self._groups_label.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkEntry(
+            group_row, textvariable=self._group_name_var, width=120, height=28,
+            placeholder_text="Название", corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            group_row, "Создать группу", self._create_switch_group, width=120, height=28,
+        ).pack(side="left")
 
-        cross = ctk.CTkFrame(frame, fg_color="transparent")
-        cross.pack(fill="x", padx=8, pady=4)
+        field_label(devices_body, "Горячая клавиша")
+        hotkey_row = ctk.CTkFrame(devices_body, fg_color="transparent")
+        hotkey_row.pack(fill="x", pady=(0, 4))
+        self._hotkey_action_var = ctk.StringVar(value="toggle")
+        ctk.CTkOptionMenu(
+            hotkey_row,
+            variable=self._hotkey_action_var,
+            values=["toggle", "on", "off"],
+            width=90,
+            height=28,
+        ).pack(side="left", padx=(0, 6))
+        btn_primary(
+            hotkey_row, "Забиндить выбранные", self._bind_hotkey_to_selection, width=150, height=28,
+        ).pack(side="left", padx=(0, 6))
+        hint_label(
+            devices_body,
+            "Нажмите кнопку бинда → затем нужную клавишу на клавиатуре. Esc — отмена. "
+            "1 Switch → на него; несколько → группа. У группы/Switch кнопка ⌨ — то же самое.",
+        )
+
+        field_label(devices_body, "Группы и привязки")
+        self._groups_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
+        self._groups_list_frame.pack(fill="x", pady=(0, 4))
+        self._hotkeys_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
+        self._hotkeys_list_frame.pack(fill="x", pady=(4, 0))
+        self._switch_check_vars: Dict[str, ctk.BooleanVar] = {}
+        self._refresh_switch_picker()
+        self._refresh_groups_label()
+
+        shop_body = settings_group(
+            parent,
+            "Аналитика магазинов",
+            "Поиск выгодных сделок между вендингами на текущем сервере.",
+        )
+        field_label(shop_body, "Частота опроса Rust+")
+        poll_row = ctk.CTkFrame(shop_body, fg_color="transparent")
+        poll_row.pack(fill="x", pady=(0, 6))
+        self._poll_interval_var = ctk.StringVar(value=str(settings.poll_interval_sec))
+        ctk.CTkOptionMenu(
+            poll_row,
+            variable=self._poll_interval_var,
+            values=["5", "8", "10", "15", "20"],
+            width=90,
+            height=28,
+            command=lambda _value: self._save_poll_interval(),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            poll_row,
+            text="сек · команда, карта, магазины",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+            anchor="w",
+        ).pack(side="left", padx=(8, 0))
+        hint_label(
+            shop_body,
+            "5 с — быстрее всего. 20 с — щадящий режим. Слишком частый опрос может упереться в лимиты Rust+.",
+        )
+        field_label(shop_body, "Item ID для расчёта profit")
+        profit_row = ctk.CTkFrame(shop_body, fg_color="transparent")
+        profit_row.pack(fill="x")
+        self._profit_item_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            profit_row, textvariable=self._profit_item_var, width=100, height=28,
+            placeholder_text="напр. -151838493", corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(profit_row, "Найти маршрут", self._show_profit, width=110, height=28).pack(side="left")
+        self._profit_label = ctk.CTkLabel(
+            shop_body, text="", font=ctk.CTkFont(size=10), text_color=Theme.MUTED, anchor="w", wraplength=500,
+        )
+        self._profit_label.pack(fill="x", pady=(6, 0))
+
+        cross_body = settings_group(
+            parent,
+            "Прицел поверх игры",
+            "Отдельное прозрачное окно — не мешает Rust+ Live.",
+        )
         self._crosshair_var = ctk.BooleanVar(value=settings.crosshair_enabled)
+        ctk.CTkCheckBox(
+            cross_body, text="Показывать прицел", variable=self._crosshair_var, command=self._save_crosshair,
+        ).pack(anchor="w", pady=(0, 6))
+        field_label(cross_body, "Размер · цвет (#hex)")
+        params = ctk.CTkFrame(cross_body, fg_color="transparent")
+        params.pack(fill="x")
         self._cross_size_var = ctk.StringVar(value=str(settings.crosshair_size))
         self._cross_color_var = ctk.StringVar(value=settings.crosshair_color)
-        ctk.CTkCheckBox(cross, text="Прицел", variable=self._crosshair_var, command=self._save_crosshair).pack(side="left")
-        ctk.CTkEntry(cross, textvariable=self._cross_size_var, width=40).pack(side="left", padx=4)
-        ctk.CTkEntry(cross, textvariable=self._cross_color_var, width=70).pack(side="left", padx=4)
-        ctk.CTkButton(cross, text="OK", width=40, command=self._save_crosshair).pack(side="left")
+        ctk.CTkEntry(params, textvariable=self._cross_size_var, width=50, height=28, corner_radius=8).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(params, textvariable=self._cross_color_var, width=80, height=28, placeholder_text="#00ff00", corner_radius=8).pack(side="left", padx=(0, 6))
+        btn_secondary(params, "Сохранить", self._save_crosshair, width=90, height=28).pack(side="left")
 
-        sound_row = ctk.CTkFrame(frame, fg_color="transparent")
-        sound_row.pack(fill="x", padx=8, pady=4)
-        self._alarm_sound_var = ctk.StringVar(value=settings.alarm_sound_path)
-        ctk.CTkLabel(sound_row, text="Звук Alarm:", font=ctk.CTkFont(size=10)).pack(side="left")
-        ctk.CTkEntry(sound_row, textvariable=self._alarm_sound_var, width=220).pack(side="left", padx=6)
-        ctk.CTkButton(sound_row, text="OK", width=40, command=self._save_alarm_sound).pack(side="left")
-
-        intel_row = ctk.CTkFrame(frame, fg_color="transparent")
-        intel_row.pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(
-            intel_row, text="Player Intel", width=100, fg_color="#2a3142",
-            command=self._show_player_intel,
-        ).pack(side="left")
-        self._intel_label = ctk.CTkLabel(intel_row, text="", font=ctk.CTkFont(size=10), text_color="#8b93a7")
-        self._intel_label.pack(side="left", padx=8)
-
-        self._fcm_warn_label = ctk.CTkLabel(
-            frame, text="", font=ctk.CTkFont(size=10), text_color="#f59e0b", anchor="w",
+        sound_body = settings_group(
+            parent,
+            "Звук Smart Alarm",
+            "Путь к .wav файлу на диске. Пусто — системный сигнал Windows.",
         )
-        self._fcm_warn_label.pack(fill="x", padx=8, pady=(0, 8))
+        self._alarm_sound_var = ctk.StringVar(value=settings.alarm_sound_path)
+        sound_row = ctk.CTkFrame(sound_body, fg_color="transparent")
+        sound_row.pack(fill="x")
+        ctk.CTkEntry(
+            sound_row,
+            textvariable=self._alarm_sound_var,
+            height=30,
+            placeholder_text="C:\\Sounds\\alarm.wav",
+            corner_radius=8,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        btn_secondary(sound_row, "Сохранить", self._save_alarm_sound, width=90, height=30).pack(side="left")
+
+        intel_body = settings_group(
+            parent,
+            "Player Intelligence",
+            "Локальная статистика онлайна без Battlemetrics. Нужно несколько сессий для данных.",
+        )
+        intel_row = ctk.CTkFrame(intel_body, fg_color="transparent")
+        intel_row.pack(fill="x")
+        btn_secondary(
+            intel_row, "Показать прогноз", self._show_player_intel, width=130, height=28,
+        ).pack(side="left")
+        self._intel_label = ctk.CTkLabel(
+            intel_body,
+            text="Укажите Steam ID в блоке «Карта» или дождитесь данных по команде",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+            anchor="w",
+            wraplength=500,
+        )
+        self._intel_label.pack(fill="x", pady=(8, 0))
+
+        warn_card = card(parent, alt=True)
+        warn_card.pack(fill="x", padx=4, pady=(0, 8))
+        ctk.CTkLabel(
+            warn_card,
+            text="FCM и pairing",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=Theme.MUTED,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        self._fcm_warn_label = ctk.CTkLabel(
+            warn_card,
+            text="",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.WARN,
+            anchor="w",
+            wraplength=520,
+        )
+        self._fcm_warn_label.pack(fill="x", padx=12, pady=(0, 12))
         self._refresh_fcm_warning()
         self._refresh_groups_label()
 
@@ -543,12 +859,30 @@ class RustPlusHubFeature(Feature):
             alarm=self._alert_vars["alarm"].get(),
         )
         self._service.update_alert_settings(alerts)
-        self._sync_map_overlays()
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
         if self._service.connection.is_connected:
             self._service.fetch_map()
 
+    def _save_map_layers(self) -> None:
+        layers = MapLayerSettings(
+            monuments=self._map_layer_vars["monuments"].get(),
+            players=self._map_layer_vars["players"].get(),
+            shops=self._map_layer_vars["shops"].get(),
+        )
+        self._service.update_map_layers(layers)
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
+        if self._service.connection.is_connected:
+            self._service.fetch_map()
+
+    def _map_overlay_team(self) -> List[Dict[str, Any]]:
+        if not self._service.store.get_map_layers().players:
+            return []
+        return self._team_cache
+
     def _map_overlay_vendors(self) -> List[Dict[str, Any]]:
-        if not self._service.store.get_alert_settings().shop:
+        if not self._service.store.get_map_layers().shops:
             return []
         return self._vendors_cache
 
@@ -574,11 +908,23 @@ class RustPlusHubFeature(Feature):
         self._service.update_app_settings(settings)
         set_autostart(settings.autostart)
 
+    def _save_poll_interval(self) -> None:
+        try:
+            interval = int(self._poll_interval_var.get())
+        except ValueError:
+            interval = 10
+        interval = max(5, min(20, interval))
+        self._poll_interval_var.set(str(interval))
+        settings = self._service.store.get_settings()
+        settings.poll_interval_sec = interval
+        self._service.update_app_settings(settings)
+
     def _save_follow(self) -> None:
         raw = self._follow_var.get().strip()
         steam_id = int(raw) if raw.isdigit() else None
         self._service.store.set_follow_steam_id(steam_id)
-        self._sync_map_overlays()
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
 
     def _save_crosshair(self) -> None:
         settings = self._service.store.get_settings()
@@ -635,12 +981,14 @@ class RustPlusHubFeature(Feature):
         count = self._service.store.import_devices(server.id, blob.strip())
         self._refresh_devices_panel()
         self._service.connection.refresh_devices()
+        self._refresh_groups_label()
         self._set_status(f"Импортировано устройств: {count}")
 
     def _clear_deaths(self) -> None:
         server = self._service.get_active_server()
         self._service.store.clear_death_markers(server.id if server else None)
-        self._sync_map_overlays()
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
 
     def _show_profit(self) -> None:
         raw = self._profit_item_var.get().strip()
@@ -659,42 +1007,391 @@ class RustPlusHubFeature(Feature):
     def _create_switch_group(self) -> None:
         server = self._service.get_active_server()
         if not server:
+            self._set_status("Нет активного сервера", error=True)
             return
-        switches = [d.id for d in self._service.store.list_devices(server.id) if d.device_type == "smart_switch"]
-        if not switches:
-            self._set_status("Нет Switch для группы", error=True)
+        selected = self._selected_switches()
+        if not selected:
+            self._set_status("Отметьте хотя бы один Switch", error=True)
             return
         name = self._group_name_var.get().strip() or "Группа"
-        self._service.store.add_device_group(server.id, name, switches)
+        group = self._service.store.add_device_group(
+            server.id, name, [d.id for d in selected],
+        )
+        names = ", ".join(d.name for d in selected)
+        self._set_status(f"Группа «{group.name}»: {names}")
         self._refresh_groups_label()
 
-    def _bind_group_hotkey(self) -> None:
-        groups = self._service.store.list_device_groups()
-        if not groups:
-            self._set_status("Сначала создайте группу", error=True)
+    def _normalize_captured_hotkey(self, hotkey: str) -> Optional[str]:
+        hotkey = (hotkey or "").strip().lower()
+        if not hotkey:
+            return None
+        reserved_names = {"f5", "f6"}
+        reserved_scans: set[int] = set()
+        try:
+            import keyboard
+            for name in reserved_names:
+                reserved_scans.update(keyboard.key_to_scan_codes(name, False) or ())
+        except Exception:
+            reserved_scans.update({63, 64})  # типичные scancode F5/F6
+        for part in hotkey.split("+"):
+            part = part.strip()
+            if part in reserved_names:
+                self._set_status(f"Клавиша {part.upper()} зарезервирована (оверлей)", error=True)
+                return None
+            if part.startswith("sc:"):
+                try:
+                    scan = int(part[3:])
+                except ValueError:
+                    continue
+                if scan in reserved_scans:
+                    self._set_status(f"Клавиша {hotkey_label(hotkey)} зарезервирована (оверлей)", error=True)
+                    return None
+        return hotkey
+
+    def _capture_hotkey(
+        self,
+        *,
+        prompt: str,
+        on_hotkey,
+    ) -> None:
+        if self._key_capture.is_active:
             return
-        hotkey = self._hotkey_var.get().strip().lower()
-        self._service.store.add_device_hotkey(hotkey, groups[-1].id, "toggle")
+        self._set_status("Ожидание клавиши…")
+        # чтобы случайно не сработали уже привязанные device hotkeys во время захвата
+        self._service.unload_device_hotkeys()
+
+        def on_captured(raw: str) -> None:
+            self._service.reload_device_hotkeys()
+            hotkey = self._normalize_captured_hotkey(raw)
+            if not hotkey:
+                return
+            on_hotkey(hotkey)
+
+        def on_cancel() -> None:
+            self._service.reload_device_hotkeys()
+            self._set_status("Привязка отменена")
+
+        self._key_capture.capture(on_captured, on_cancel=on_cancel, prompt=prompt)
+
+    def _bind_hotkey_to_selection(self) -> None:
+        selected = self._selected_switches()
+        if not selected:
+            self._set_status("Отметьте Switch для hotkey", error=True)
+            return
+        names = ", ".join(d.name for d in selected)
+        self._capture_hotkey(
+            prompt=f"Клавиша для:\n{names}",
+            on_hotkey=lambda hk: self._apply_hotkey_to_selection(hk, selected),
+        )
+
+    def _apply_hotkey_to_selection(self, hotkey: str, selected) -> None:
+        action = self._hotkey_action_var.get().strip().lower() or "toggle"
+        try:
+            if len(selected) == 1:
+                device = selected[0]
+                self._service.store.add_device_hotkey(
+                    hotkey, device_id=device.id, action=action,
+                )
+                target = device.name
+            else:
+                server = self._service.get_active_server()
+                if not server:
+                    self._set_status("Нет активного сервера", error=True)
+                    return
+                name = self._group_name_var.get().strip() or f"Группа {hotkey.upper()}"
+                group = self._service.store.add_device_group(
+                    server.id, name, [d.id for d in selected],
+                )
+                self._service.store.add_device_hotkey(
+                    hotkey, group_id=group.id, action=action,
+                )
+                target = f"{group.name} ({', '.join(d.name for d in selected)})"
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
         self._service.reload_device_hotkeys()
-        self._set_status(f"Hotkey {hotkey} → {groups[-1].name}")
+        self._set_status(f"{hotkey_label(hotkey)} → {action} → {target}")
+        self._refresh_groups_label()
+        self._refresh_devices_panel()
+
+    def _bind_hotkey_to_group_id(self, group_id: str, group_name: str) -> None:
+        self._capture_hotkey(
+            prompt=f"Клавиша для группы «{group_name}»",
+            on_hotkey=lambda hk: self._apply_hotkey_to_group(hk, group_id, group_name),
+        )
+
+    def _apply_hotkey_to_group(self, hotkey: str, group_id: str, group_name: str) -> None:
+        action = self._hotkey_action_var.get().strip().lower() or "toggle"
+        try:
+            self._service.store.add_device_hotkey(
+                hotkey, group_id=group_id, action=action,
+            )
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        self._service.reload_device_hotkeys()
+        group = next((g for g in self._service.store.list_device_groups() if g.id == group_id), None)
+        members = self._group_member_names(group) if group else "?"
+        self._set_status(f"{hotkey_label(hotkey)} → {group_name}: {members}")
+        self._refresh_groups_label()
+        self._refresh_devices_panel()
+
+    def _bind_device_hotkey_dialog(self, device_id: str, device_name: str) -> None:
+        self._capture_hotkey(
+            prompt=f"Клавиша для Switch «{device_name}»",
+            on_hotkey=lambda hk: self._apply_hotkey_to_device(hk, device_id, device_name),
+        )
+
+    def _apply_hotkey_to_device(self, hotkey: str, device_id: str, device_name: str) -> None:
+        try:
+            self._service.store.add_device_hotkey(
+                hotkey, device_id=device_id, action="toggle",
+            )
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        self._service.reload_device_hotkeys()
+        self._set_status(f"{hotkey_label(hotkey)} → toggle → {device_name}")
+        self._refresh_groups_label()
+        self._refresh_devices_panel()
+
+    def _selected_switches(self):
+        server = self._service.get_active_server()
+        if not server:
+            return []
+        devices = [
+            d for d in self._service.store.list_devices(server.id)
+            if d.device_type == "smart_switch"
+        ]
+        return [d for d in devices if self._switch_check_vars.get(d.id) and self._switch_check_vars[d.id].get()]
+
+    def _select_all_switches(self) -> None:
+        for var in self._switch_check_vars.values():
+            var.set(True)
+        self._update_selection_summary()
+
+    def _clear_switch_selection(self) -> None:
+        for var in self._switch_check_vars.values():
+            var.set(False)
+        self._update_selection_summary()
+
+    def _update_selection_summary(self) -> None:
+        if not hasattr(self, "_selection_summary"):
+            return
+        selected = self._selected_switches()
+        if not selected:
+            self._selection_summary.configure(text="Ничего не выбрано")
+            return
+        names = ", ".join(d.name for d in selected)
+        self._selection_summary.configure(
+            text=f"В группу / hotkey попадёт ({len(selected)}): {names}",
+        )
+
+    def _refresh_switch_picker(self) -> None:
+        if not hasattr(self, "_switch_pick_frame") or self._switch_pick_frame is None:
+            return
+        for child in self._switch_pick_frame.winfo_children():
+            child.destroy()
+        prev = {did: var.get() for did, var in getattr(self, "_switch_check_vars", {}).items()}
+        self._switch_check_vars = {}
+        server = self._service.get_active_server()
+        if not server:
+            ctk.CTkLabel(
+                self._switch_pick_frame,
+                text="Подключитесь к серверу",
+                text_color=Theme.DIM,
+                font=ctk.CTkFont(size=11),
+            ).pack(anchor="w", padx=8, pady=8)
+            self._update_selection_summary()
+            return
+        switches = [
+            d for d in self._service.store.list_devices(server.id)
+            if d.device_type == "smart_switch"
+        ]
+        if not switches:
+            ctk.CTkLabel(
+                self._switch_pick_frame,
+                text="Нет Smart Switch. Спарьте устройство в игре.",
+                text_color=Theme.DIM,
+                font=ctk.CTkFont(size=11),
+            ).pack(anchor="w", padx=8, pady=8)
+            self._update_selection_summary()
+            return
+        for device in switches:
+            var = ctk.BooleanVar(value=bool(prev.get(device.id, False)))
+            self._switch_check_vars[device.id] = var
+            ctk.CTkCheckBox(
+                self._switch_pick_frame,
+                text=device.name,
+                variable=var,
+                command=self._update_selection_summary,
+                font=ctk.CTkFont(size=12),
+            ).pack(anchor="w", padx=8, pady=2)
+        self._update_selection_summary()
+
+    def _group_member_names(self, group) -> str:
+        by_id = {d.id: d.name for d in self._service.store.list_devices(group.server_id)}
+        names = [by_id.get(did, "?") for did in group.device_ids]
+        return ", ".join(names) if names else "пусто"
 
     def _refresh_groups_label(self) -> None:
-        groups = self._service.store.list_device_groups()
-        hotkeys = self._service.store.list_device_hotkeys()
-        text = f"Групп: {len(groups)} | Hotkeys: {', '.join(h.hotkey for h in hotkeys) or 'нет'}"
-        if hasattr(self, "_groups_label"):
-            self._groups_label.configure(text=text)
+        self._refresh_switch_picker()
+        if hasattr(self, "_groups_list_frame") and self._groups_list_frame is not None:
+            for child in self._groups_list_frame.winfo_children():
+                child.destroy()
+            server = self._service.get_active_server()
+            groups = self._service.store.list_device_groups(server.id if server else None)
+            if not groups:
+                ctk.CTkLabel(
+                    self._groups_list_frame,
+                    text="Групп пока нет",
+                    font=ctk.CTkFont(size=10),
+                    text_color=Theme.DIM,
+                    anchor="w",
+                ).pack(fill="x")
+            else:
+                for group in groups:
+                    row = ctk.CTkFrame(self._groups_list_frame, fg_color=Theme.CARD_ALT, corner_radius=6)
+                    row.pack(fill="x", pady=2)
+                    members = self._group_member_names(group)
+                    ctk.CTkLabel(
+                        row,
+                        text=f"📦 {group.name}: {members}",
+                        font=ctk.CTkFont(size=11),
+                        text_color=Theme.TEXT,
+                        anchor="w",
+                        wraplength=420,
+                        justify="left",
+                    ).pack(side="left", padx=8, pady=6, fill="x", expand=True)
+                    ctk.CTkButton(
+                        row, text="⌨", width=28, height=24, fg_color="#3d4659",
+                        command=lambda gid=group.id, gname=group.name: self._bind_hotkey_to_group_id(gid, gname),
+                    ).pack(side="right", padx=2, pady=4)
+                    ctk.CTkButton(
+                        row, text="✕", width=28, height=24, fg_color="#3d4659",
+                        command=lambda gid=group.id: self._delete_device_group(gid),
+                    ).pack(side="right", padx=6, pady=4)
+
+        if hasattr(self, "_hotkeys_list_frame") and self._hotkeys_list_frame is not None:
+            for child in self._hotkeys_list_frame.winfo_children():
+                child.destroy()
+            hotkeys = self._service.store.list_device_hotkeys()
+            if not hotkeys:
+                ctk.CTkLabel(
+                    self._hotkeys_list_frame,
+                    text="Hotkey не привязаны",
+                    font=ctk.CTkFont(size=10),
+                    text_color=Theme.DIM,
+                    anchor="w",
+                ).pack(fill="x")
+                return
+            devices = {d.id: d for d in self._service.store.list_devices()}
+            groups = {g.id: g for g in self._service.store.list_device_groups()}
+            for entry in hotkeys:
+                if entry.device_id and entry.device_id in devices:
+                    target = f"Switch «{devices[entry.device_id].name}»"
+                elif entry.group_id and entry.group_id in groups:
+                    group = groups[entry.group_id]
+                    target = f"группа «{group.name}» ({self._group_member_names(group)})"
+                else:
+                    target = "не найдено"
+                row = ctk.CTkFrame(self._hotkeys_list_frame, fg_color=Theme.CARD_ALT, corner_radius=6)
+                row.pack(fill="x", pady=2)
+                ctk.CTkLabel(
+                    row,
+                    text=f"⌨ {hotkey_label(entry.hotkey)} · {entry.action} → {target}",
+                    font=ctk.CTkFont(size=11),
+                    text_color=Theme.TEXT,
+                    anchor="w",
+                    wraplength=420,
+                    justify="left",
+                ).pack(side="left", padx=8, pady=6, fill="x", expand=True)
+                ctk.CTkButton(
+                    row, text="✕", width=28, height=24, fg_color="#3d4659",
+                    command=lambda hid=entry.id: self._delete_device_hotkey(hid),
+                ).pack(side="right", padx=6, pady=4)
+
+    def _delete_device_group(self, group_id: str) -> None:
+        self._service.store.remove_device_group(group_id)
+        self._service.reload_device_hotkeys()
+        self._set_status("Группа удалена")
+        self._refresh_groups_label()
+        self._refresh_devices_panel()
+
+    def _delete_device_hotkey(self, hotkey_id: str) -> None:
+        self._service.store.remove_device_hotkey(hotkey_id)
+        self._service.reload_device_hotkeys()
+        self._set_status("Hotkey удалён")
+        self._refresh_groups_label()
+        self._refresh_devices_panel()
 
     def _refresh_fcm_warning(self) -> None:
         if hasattr(self, "_fcm_warn_label"):
             warn = self._service.store.fcm_expiry_warning()
             self._fcm_warn_label.configure(text=warn or "")
 
+    def _is_map_tab_active(self) -> bool:
+        try:
+            return self._tabs.get().strip() == "Карта"
+        except Exception:
+            return False
+
+    def _on_tab_changed(self) -> None:
+        if self._is_map_tab_active():
+            self._apply_vendor_filters(render_panel=True)
+
+    def _schedule_vendor_refresh(self, *, force: bool = False) -> None:
+        if self._vendors_render_job:
+            self._root.after_cancel(self._vendors_render_job)
+
+        def run() -> None:
+            self._vendors_render_job = None
+            signature = vendors_state_signature(self._vendors_cache)
+            if not force and signature == self._vendors_signature:
+                self._update_vendors_count_meta()
+                return
+            self._vendors_signature = signature
+            self._apply_vendor_filters(render_panel=self._is_map_tab_active() or force)
+
+        self._vendors_render_job = self._root.after(self.VENDOR_REFRESH_DEBOUNCE_MS, run)
+
+    def _schedule_map_overlay_sync(self) -> None:
+        if self._map_sync_job:
+            self._root.after_cancel(self._map_sync_job)
+
+        def run() -> None:
+            self._map_sync_job = None
+            signature = self._map_overlay_data_signature()
+            if signature == self._map_overlay_signature:
+                return
+            self._map_overlay_signature = signature
+            self._sync_map_overlays()
+
+        self._map_sync_job = self._root.after(self.MAP_SYNC_DEBOUNCE_MS, run)
+
+    def _map_overlay_data_signature(self) -> str:
+        server = self._service.get_active_server()
+        server_id = server.id if server else None
+        team = self._map_overlay_team()
+        team_bits = [
+            f"{m.get('steam_id')}:{int(bool(m.get('is_online')))}:{m.get('x')}:{m.get('y')}"
+            for m in team[:16]
+        ]
+        return "|".join([
+            str(server_id),
+            str(self._map_size),
+            str(len(self._vendors_cache)),
+            str(len(self._events_cache)),
+            str(self._service.store.get_follow_steam_id()),
+            str(self._service.store.get_tracked_event_id()),
+            ",".join(team_bits),
+        ])
+
     def _sync_map_overlays(self) -> None:
         server = self._service.get_active_server()
         server_id = server.id if server else None
         state = {
-            "members": self._team_cache,
+            "members": self._map_overlay_team(),
             "map_size": self._map_size,
             "death_markers": self._map_overlay_deaths(server_id),
             "drawings": [
@@ -720,7 +1417,8 @@ class RustPlusHubFeature(Feature):
 
     def _track_event(self, event_id: Optional[int]) -> None:
         self._service.store.set_tracked_event_id(event_id)
-        self._sync_map_overlays()
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
         if event_id:
             self._set_status(f"Трекинг события #{event_id} на карте")
 
@@ -729,7 +1427,8 @@ class RustPlusHubFeature(Feature):
         if not server:
             return
         self._service.store.add_map_drawing(server.id, x, y, text)
-        self._sync_map_overlays()
+        self._map_overlay_signature = None
+        self._schedule_map_overlay_sync()
 
     def _clear_frame(self, frame: Optional[ctk.CTkFrame]) -> None:
         if not frame:
@@ -780,33 +1479,356 @@ class RustPlusHubFeature(Feature):
             btn.pack(fill="x", padx=8, pady=2)
         self.request_resize()
 
-    def _refresh_vendors_panel(self, vendors: List[Dict[str, Any]]) -> None:
+    def _refresh_vendors_panel(self) -> None:
         if not self._vendors_frame:
             return
         self._clear_frame(self._vendors_frame)
-        if not vendors:
-            ctk.CTkLabel(self._vendors_frame, text="Нет магазинов", text_color="#6b7280").pack(
-                anchor="w", padx=8, pady=8,
-            )
+        self._vendor_icon_refs.clear()
+        self._vendor_icon_labels.clear()
+
+        if self._vendor_view_mode == "offers":
+            self._refresh_vendor_offers_panel()
+        else:
+            self._refresh_vendor_catalog_panel()
+        self._update_vendors_count_meta()
+
+    def _refresh_vendor_catalog_panel(self) -> None:
+        if not self._vendors_frame:
             return
-        for vendor in vendors[:15]:
-            stock = "пусто" if vendor.get("out_of_stock") else "в наличии"
-            orders = vendor.get("sell_orders", [])
-            order_hint = ""
-            if orders:
-                first = orders[0]
-                order_hint = f" | item {first.get('item_id')} x{first.get('quantity')} за {first.get('cost_per_item')}"
+        items = self._current_vendor_catalog_page()
+        if not items:
             ctk.CTkLabel(
                 self._vendors_frame,
-                text=f"{vendor.get('name', 'Магазин')} [{vendor.get('grid', '?')}] — {stock}{order_hint}",
-                anchor="w", font=ctk.CTkFont(size=10), text_color="#d1d7e3",
-            ).pack(fill="x", padx=8, pady=2)
-        self.request_resize()
+                text="Нет товаров в наличии",
+                text_color=Theme.DIM,
+            ).pack(anchor="w", padx=8, pady=8)
+            return
 
-    def _search_vendors(self) -> None:
-        query = self._vendor_search.get() if self._vendor_search else ""
-        filtered = filter_vendors(self._vendors_cache, query)
-        self._refresh_vendors_panel(filtered)
+        icons = self._service.item_icons
+        icon_size = 24
+        for item in items:
+            row = ctk.CTkFrame(self._vendors_frame, fg_color=Theme.CARD_ALT, corner_radius=8, cursor="hand2")
+            row.pack(fill="x", padx=8, pady=2)
+            row.bind("<Button-1>", lambda _e, iid=int(item["item_id"]): self._select_vendor_item(iid))
+
+            item_icon = ctk.CTkLabel(
+                row,
+                text="",
+                width=icon_size,
+                height=icon_size,
+                fg_color="transparent",
+            )
+            item_icon.pack(side="left", padx=(8, 6), pady=6)
+            item_icon.bind("<Button-1>", lambda _e, iid=int(item["item_id"]): self._select_vendor_item(iid))
+            self._queue_item_icon(item_icon, int(item["item_id"]), icon_size, icons)
+
+            min_cost = int(item.get("min_cost", 0))
+            currency_name = icons.item_name(int(item.get("min_currency_id", 0)))
+            meta = f"{item.get('shop_count', 0)} лавок · от {min_cost} {currency_name}"
+            label = ctk.CTkLabel(
+                row,
+                text=f"{item.get('name', 'Товар')}  ·  {meta}",
+                anchor="w",
+                font=ctk.CTkFont(size=11),
+                text_color=Theme.TEXT,
+            )
+            label.pack(side="left", fill="x", expand=True, pady=6, padx=(0, 8))
+            label.bind("<Button-1>", lambda _e, iid=int(item["item_id"]): self._select_vendor_item(iid))
+
+    def _refresh_vendor_offers_panel(self) -> None:
+        if not self._vendors_frame or self._vendor_selected_item_id is None:
+            return
+        offers = self._current_vendor_offers_page()
+        if not offers:
+            ctk.CTkLabel(
+                self._vendors_frame,
+                text="Нет предложений по выбранному товару",
+                text_color=Theme.DIM,
+            ).pack(anchor="w", padx=8, pady=8)
+            return
+
+        icons = self._service.item_icons
+        icon_size = 24
+        kind_labels = {
+            "player": ("Игрок", Theme.INFO),
+            "monument": ("Монумент", Theme.MUTED),
+            "traveling": ("Бродяга", Theme.WARN),
+        }
+        for offer in offers:
+            vendor = offer["vendor"]
+            order = offer["order"]
+            card = ctk.CTkFrame(self._vendors_frame, fg_color="#1a2030", corner_radius=8)
+            card.pack(fill="x", padx=8, pady=4)
+
+            kind = classify_vendor(vendor)
+            kind_text, kind_color = kind_labels.get(kind, ("Магазин", Theme.MUTED))
+            head = ctk.CTkFrame(card, fg_color="transparent")
+            head.pack(fill="x", padx=8, pady=(8, 4))
+            ctk.CTkLabel(
+                head,
+                text=f"{vendor.get('name', 'Магазин')} [{vendor.get('grid', '?')}]",
+                anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=Theme.TEXT,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                head,
+                text=kind_text,
+                font=ctk.CTkFont(size=9, weight="bold"),
+                text_color=kind_color,
+                fg_color=Theme.CARD_ALT,
+                corner_radius=6,
+                padx=6,
+                pady=2,
+            ).pack(side="right", padx=(6, 0))
+
+            self._build_vendor_order_row(card, order, icon_size, icons)
+
+    def _select_vendor_item(self, item_id: int) -> None:
+        self._vendor_selected_item_id = int(item_id)
+        self._vendor_view_mode = "offers"
+        self._vendor_page = 0
+        self._vendor_offers_cache = collect_item_offers(
+            self._filtered_vendors_for_catalog(),
+            self._vendor_selected_item_id,
+        )
+        if self._vendor_back_btn and self._vendor_prev_btn:
+            self._vendor_back_btn.pack(side="left", padx=(0, 6), before=self._vendor_prev_btn)
+        icons = self._service.item_icons
+        if self._vendor_selected_label:
+            self._vendor_selected_label.configure(
+                text=icons.item_name(self._vendor_selected_item_id),
+            )
+        self._refresh_vendors_panel()
+
+    def _show_vendor_catalog(self) -> None:
+        self._vendor_view_mode = "catalog"
+        self._vendor_selected_item_id = None
+        self._vendor_page = 0
+        self._vendor_offers_cache = []
+        if self._vendor_back_btn:
+            self._vendor_back_btn.pack_forget()
+        if self._vendor_selected_label:
+            self._vendor_selected_label.configure(text="")
+        self._refresh_vendors_panel()
+
+    def _build_vendor_order_row(
+        self,
+        parent: ctk.CTkFrame,
+        order: Dict[str, Any],
+        icon_size: int,
+        icons,
+    ) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=2)
+
+        item_id = int(order.get("item_id", 0))
+        currency_id = int(order.get("currency_id", 0))
+        qty = int(order.get("quantity", 0))
+        cost = int(order.get("cost_per_item", 0))
+        stock = int(order.get("amount_in_stock", 0))
+
+        item_icon = ctk.CTkLabel(
+            row,
+            text="",
+            width=icon_size,
+            height=icon_size,
+            fg_color=Theme.CARD_ALT,
+            corner_radius=6,
+        )
+        item_icon.pack(side="left")
+        self._queue_item_icon(item_icon, item_id, icon_size, icons)
+
+        ctk.CTkLabel(
+            row,
+            text=f"×{qty}",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=Theme.TEXT,
+            width=34,
+        ).pack(side="left", padx=(4, 2))
+
+        ctk.CTkLabel(
+            row,
+            text="→",
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.MUTED,
+            width=16,
+        ).pack(side="left")
+
+        currency_icon = ctk.CTkLabel(
+            row,
+            text="",
+            width=icon_size,
+            height=icon_size,
+            fg_color=Theme.CARD_ALT,
+            corner_radius=6,
+        )
+        currency_icon.pack(side="left", padx=(2, 0))
+        self._queue_item_icon(currency_icon, currency_id, icon_size, icons)
+
+        ctk.CTkLabel(
+            row,
+            text=f"×{cost}",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=Theme.ACCENT,
+            width=40,
+        ).pack(side="left", padx=(4, 0))
+
+        hint = f"остаток {stock}" if stock else icons.item_name(item_id)
+        ctk.CTkLabel(
+            row,
+            text=hint,
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+            anchor="w",
+        ).pack(side="left", padx=(8, 0))
+
+    def _queue_item_icon(
+        self,
+        label: ctk.CTkLabel,
+        item_id: int,
+        icon_size: int,
+        icons,
+    ) -> None:
+        item_id = int(item_id)
+        image = icons.get(item_id)
+        if image:
+            self._apply_item_icon(label, image, icon_size)
+            return
+
+        fallback = icons.fallback_glyph(item_id)
+        label.configure(text=fallback, font=ctk.CTkFont(size=10, weight="bold"), text_color=Theme.MUTED)
+
+        def on_ready(iid: int, pil_image: Image.Image) -> None:
+            if not label.winfo_exists():
+                return
+            self._root.after(0, lambda: self._apply_item_icon(label, pil_image, icon_size))
+
+        icons.fetch_async(item_id, on_ready)
+
+    def _apply_item_icon(self, label: ctk.CTkLabel, image: Image.Image, icon_size: int) -> None:
+        if not label.winfo_exists():
+            return
+        thumb = image.copy()
+        thumb.thumbnail((icon_size, icon_size), Image.Resampling.LANCZOS)
+        ctk_image = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=(icon_size, icon_size))
+        self._vendor_icon_refs.append(ctk_image)
+        label.configure(image=ctk_image, text="")
+
+    def _set_vendor_kind(self, kind: str) -> None:
+        self._vendor_kind_var.set(kind)
+        self._vendor_page = 0
+        if self._vendor_view_mode == "offers" and self._vendor_selected_item_id is not None:
+            self._vendor_offers_cache = collect_item_offers(
+                self._filtered_vendors_for_catalog(),
+                self._vendor_selected_item_id,
+            )
+        self._apply_vendor_filters(render_panel=True)
+
+    def _vendor_prev_page(self) -> None:
+        if self._vendor_page > 0:
+            self._vendor_page -= 1
+            self._refresh_vendors_panel()
+
+    def _vendor_next_page(self) -> None:
+        if self._vendor_view_mode == "offers":
+            items = self._vendor_offers_cache
+            page_size = self.VENDOR_OFFER_PAGE_SIZE
+        else:
+            items = self._vendor_filtered_catalog or self._rebuild_vendor_catalog()
+            page_size = self.VENDOR_ITEM_PAGE_SIZE
+        total_pages = max(1, (len(items) + page_size - 1) // page_size)
+        if self._vendor_page < total_pages - 1:
+            self._vendor_page += 1
+            self._refresh_vendors_panel()
+
+    def _filtered_vendors_for_catalog(self) -> List[Dict[str, Any]]:
+        return filter_vendors_by_kind(self._vendors_cache, self._vendor_kind_var.get())
+
+    def _rebuild_vendor_catalog(self) -> List[Dict[str, Any]]:
+        vendors = self._filtered_vendors_for_catalog()
+        self._vendor_catalog_cache = build_vendor_item_catalog(
+            vendors,
+            item_name_fn=self._service.item_icons.item_name,
+            in_stock_only=True,
+        )
+        query = self._vendor_search.get().strip() if self._vendor_search else ""
+        self._vendor_filtered_catalog = filter_vendor_catalog_items(self._vendor_catalog_cache, query)
+        return self._vendor_filtered_catalog
+
+    def _current_vendor_catalog_page(self) -> List[Dict[str, Any]]:
+        items = self._vendor_filtered_catalog or self._rebuild_vendor_catalog()
+        start = self._vendor_page * self.VENDOR_ITEM_PAGE_SIZE
+        return items[start:start + self.VENDOR_ITEM_PAGE_SIZE]
+
+    def _current_vendor_offers_page(self) -> List[Dict[str, Any]]:
+        offers = self._vendor_offers_cache
+        start = self._vendor_page * self.VENDOR_OFFER_PAGE_SIZE
+        return offers[start:start + self.VENDOR_OFFER_PAGE_SIZE]
+
+    def _apply_vendor_filters(self, *, render_panel: bool = True) -> None:
+        self._rebuild_vendor_catalog()
+        if self._vendor_view_mode == "offers" and self._vendor_selected_item_id is not None:
+            self._vendor_offers_cache = collect_item_offers(
+                self._filtered_vendors_for_catalog(),
+                self._vendor_selected_item_id,
+            )
+        if render_panel:
+            self._refresh_vendors_panel()
+        else:
+            self._update_vendors_count_meta()
+
+    def _update_vendors_count_meta(self) -> None:
+        if not self._vendors_count_label:
+            return
+        total_vendors = self._vendors_cache
+        if self._vendor_view_mode == "offers":
+            items = self._vendor_offers_cache
+            page_size = self.VENDOR_OFFER_PAGE_SIZE
+            label_prefix = "предложений"
+        else:
+            items = self._vendor_filtered_catalog or self._rebuild_vendor_catalog()
+            page_size = self.VENDOR_ITEM_PAGE_SIZE
+            label_prefix = "товаров"
+
+        total_pages = max(1, (len(items) + page_size - 1) // page_size)
+        if self._vendor_page >= total_pages:
+            self._vendor_page = 0
+        shown_from = self._vendor_page * page_size + 1 if items else 0
+        shown_to = min((self._vendor_page + 1) * page_size, len(items))
+        catalog_size = len(self._vendor_catalog_cache)
+        if not catalog_size and self._vendors_cache:
+            catalog_size = len(self._rebuild_vendor_catalog())
+        self._vendors_count_label.configure(
+            text=(
+                f"{label_prefix} {shown_from}-{shown_to} из {len(items)}"
+                f" · в каталоге {catalog_size}"
+                f" · лавок {len(total_vendors)}"
+            ),
+        )
+        if self._vendor_page_label:
+            self._vendor_page_label.configure(text=f"стр. {self._vendor_page + 1}/{total_pages}")
+
+    def _search_vendor_items(self) -> None:
+        self._vendor_page = 0
+        if self._vendor_view_mode == "catalog":
+            self._apply_vendor_filters(render_panel=True)
+        else:
+            self._show_vendor_catalog()
+            self._apply_vendor_filters(render_panel=True)
+
+    def _on_vendor_item_search_change(self) -> None:
+        if self._vendor_view_mode != "catalog":
+            return
+        if self._vendors_render_job:
+            self._root.after_cancel(self._vendors_render_job)
+
+        def run() -> None:
+            self._vendors_render_job = None
+            self._vendor_page = 0
+            self._apply_vendor_filters(render_panel=True)
+
+        self._vendors_render_job = self._root.after(250, run)
 
     def _refresh_devices_panel(self) -> None:
         if not self._devices_frame:
@@ -830,15 +1852,20 @@ class RustPlusHubFeature(Feature):
             ).pack(anchor="w", padx=8, pady=8)
             return
 
+        hotkey_by_device = self._device_hotkey_hints(server.id)
+
         for device in devices:
             row = ctk.CTkFrame(self._devices_frame, fg_color="#1a2030", corner_radius=4)
             row.pack(fill="x", padx=4, pady=2)
             state = self._device_states.get(device.entity_id, {})
             if device.device_type == "smart_switch":
-                status = "ВКЛ" if state.get("value") else "ВЫКЛ"
+                is_on = bool(state.get("value"))
+                status = "ВКЛ" if is_on else "ВЫКЛ"
             elif device.device_type == "smart_alarm":
+                is_on = False
                 status = "🚨 ТРЕВОГА" if state.get("value") else "ок"
             elif device.device_type == "storage_monitor":
+                is_on = False
                 items = state.get("items", "?")
                 cap = state.get("capacity", "?")
                 expiry = state.get("protection_expiry")
@@ -854,33 +1881,118 @@ class RustPlusHubFeature(Feature):
                 else:
                     status = f"{items}/{cap}"
             else:
+                is_on = False
                 status = "тревога" if state.get("value") else "ок"
 
             color = "#f87171" if device.device_type == "smart_alarm" and state.get("value") else "#d1d7e3"
-            ctk.CTkLabel(
-                row,
-                text=f"{device.name} ({device.device_type}) — {status}",
-                anchor="w", font=ctk.CTkFont(size=10), text_color=color,
-            ).pack(side="left", padx=8, pady=6)
-
+            name_wrap = ctk.CTkFrame(row, fg_color="transparent")
+            name_wrap.pack(side="left", fill="x", expand=True, padx=8, pady=4)
             if device.device_type == "smart_switch":
-                ctk.CTkButton(
-                    row, text="ON", width=40, height=24, fg_color="#2a5a2a",
-                    command=lambda eid=device.entity_id: self._service.toggle_device(eid, True),
-                ).pack(side="right", padx=2)
-                ctk.CTkButton(
-                    row, text="OFF", width=40, height=24, fg_color="#4a2230",
-                    command=lambda eid=device.entity_id: self._service.toggle_device(eid, False),
-                ).pack(side="right", padx=2)
+                label_text = device.name
+            else:
+                label_text = f"{device.name} — {status}"
+            ctk.CTkLabel(
+                name_wrap,
+                text=label_text,
+                anchor="w", font=ctk.CTkFont(size=12), text_color=color,
+            ).pack(side="left")
+            hint = hotkey_by_device.get(device.id)
+            if hint:
+                ctk.CTkLabel(
+                    name_wrap,
+                    text=f"  [{hint}]",
+                    anchor="w",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color="#e07a3a",
+                ).pack(side="left")
+
             ctk.CTkButton(
                 row, text="✕", width=28, height=24, fg_color="#3d4659",
                 command=lambda did=device.id: self._remove_device(did),
-            ).pack(side="right", padx=4)
+            ).pack(side="right", padx=(2, 6))
+            ctk.CTkButton(
+                row, text="✎", width=28, height=24, fg_color="#3d4659",
+                command=lambda did=device.id, dname=device.name: self._rename_device(did, dname),
+            ).pack(side="right", padx=2)
+
+            if device.device_type == "smart_switch":
+                ctk.CTkButton(
+                    row, text="⌨", width=28, height=24, fg_color="#3d4659",
+                    command=lambda did=device.id, dname=device.name: self._bind_device_hotkey_dialog(did, dname),
+                ).pack(side="right", padx=2)
+                switch_var = ctk.BooleanVar(value=is_on)
+                switch = ctk.CTkSwitch(
+                    row,
+                    text="Вкл" if is_on else "Выкл",
+                    variable=switch_var,
+                    width=42,
+                    progress_color="#2a9d5c",
+                    button_color="#e8ecf4",
+                    button_hover_color="#ffffff",
+                    fg_color="#4a2230",
+                )
+                switch.configure(
+                    command=lambda eid=device.entity_id, var=switch_var, sw=switch: self._on_device_switch_toggle(eid, var, sw),
+                )
+                switch.pack(side="right", padx=(8, 4), pady=4)
+        self._refresh_switch_picker()
         self.request_resize()
+
+    def _device_hotkey_hints(self, server_id: str) -> Dict[str, str]:
+        """device_id → подпись клавиши (прямая или через группу)."""
+        hints: Dict[str, str] = {}
+        groups = {g.id: g for g in self._service.store.list_device_groups(server_id)}
+        for entry in self._service.store.list_device_hotkeys():
+            label = hotkey_label(entry.hotkey)
+            if entry.device_id:
+                hints[entry.device_id] = label
+                continue
+            if not entry.group_id:
+                continue
+            group = groups.get(entry.group_id)
+            if not group:
+                continue
+            for device_id in group.device_ids:
+                # прямая привязка приоритетнее групповой
+                hints.setdefault(device_id, f"{label} · группа")
+        return hints
+
+    def _on_device_switch_toggle(
+        self,
+        entity_id: int,
+        var: ctk.BooleanVar,
+        switch_widget: Optional[ctk.CTkSwitch] = None,
+    ) -> None:
+        value = bool(var.get())
+        self._service.toggle_device(entity_id, value)
+        self._device_states.setdefault(entity_id, {})["value"] = value
+        if switch_widget is not None and switch_widget.winfo_exists():
+            switch_widget.configure(text="Вкл" if value else "Выкл")
+
+    def _rename_device(self, device_id: str, current_name: str) -> None:
+        dialog = ctk.CTkInputDialog(
+            text=f"Новое имя (сейчас: {current_name}):",
+            title="Переименовать",
+        )
+        name = dialog.get_input()
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            self._set_status("Имя не может быть пустым", error=True)
+            return
+        if self._service.store.rename_device(device_id, name) is None:
+            self._set_status("Устройство не найдено", error=True)
+            return
+        self._set_status(f"Переименовано: {current_name} → {name}")
+        self._refresh_devices_panel()
+        self._refresh_groups_label()
 
     def _remove_device(self, device_id: str) -> None:
         self._service.store.remove_device(device_id)
+        self._service.reload_device_hotkeys()
         self._refresh_devices_panel()
+        self._refresh_groups_label()
 
     def _open_camera_from_input(self) -> None:
         if not self._camera_input:
@@ -963,7 +2075,7 @@ class RustPlusHubFeature(Feature):
             return
         shown = self._minimap.toggle(self._map_path)
         if shown:
-            self._minimap.set_team(self._team_cache, self._map_size)
+            self._minimap.set_team(self._map_overlay_team(), self._map_size)
             self._set_status("Миникарта: перетаскивайте ЛКМ, скрыть — ПКМ")
         else:
             self._set_status("Миникарта скрыта")
@@ -979,7 +2091,7 @@ class RustPlusHubFeature(Feature):
             self._root,
             self._map_path,
             map_size=self._map_size,
-            team_members=self._team_cache,
+            team_members=self._map_overlay_team(),
             death_markers=self._map_overlay_deaths(
                 self._service.get_active_server().id if self._service.get_active_server() else None
             ),
@@ -1051,8 +2163,9 @@ class RustPlusHubFeature(Feature):
                 light_image=image, dark_image=image, size=image.size,
             )
             self._map_preview.configure(image=self._map_image_ref, text="")
-            self._minimap.update(path, self._team_cache, self._map_size)
-            self._sync_map_overlays()
+            self._minimap.update(path, self._map_overlay_team(), self._map_size)
+            self._map_overlay_signature = None
+            self._schedule_map_overlay_sync()
         except Exception:
             self._map_preview.configure(text="Не удалось показать карту")
         self.request_resize()
@@ -1063,6 +2176,19 @@ class RustPlusHubFeature(Feature):
             self._poll_job = None
 
     def on_shutdown(self) -> None:
+        self.on_hide()
+        if self._root and self._vendors_render_job:
+            try:
+                self._root.after_cancel(self._vendors_render_job)
+            except Exception:
+                pass
+            self._vendors_render_job = None
+        if self._root and self._map_sync_job:
+            try:
+                self._root.after_cancel(self._map_sync_job)
+            except Exception:
+                pass
+            self._map_sync_job = None
         if self._map_window and self._map_window.is_open:
             self._map_window.close()
         self._map_window = None
@@ -1262,6 +2388,9 @@ class RustPlusHubFeature(Feature):
             elif event.type == EventType.CONNECTED:
                 self._refresh_servers()
                 self._refresh_status()
+                self._service.store.sync_devices_from_pairing_log(
+                    str(event.payload.get("server_id") or "") or None
+                )
                 self._refresh_devices_panel()
                 self._service.refresh_device_states()
                 if self._info_label:
@@ -1270,6 +2399,14 @@ class RustPlusHubFeature(Feature):
             elif event.type == EventType.DISCONNECTED:
                 self._refresh_status()
                 self._vendors_cache = []
+                self._vendor_page = 0
+                self._vendor_view_mode = "catalog"
+                self._vendor_selected_item_id = None
+                self._vendor_catalog_cache = []
+                self._vendor_filtered_catalog = []
+                self._vendor_offers_cache = []
+                self._vendors_signature = None
+                self._map_overlay_signature = None
                 self._device_states = {}
                 self._server_time = ""
                 self._map_path = None
@@ -1281,7 +2418,11 @@ class RustPlusHubFeature(Feature):
                 self._refresh_alerts_panel()
                 self._refresh_team_panel([])
                 self._refresh_events_panel([])
-                self._refresh_vendors_panel([])
+                if self._vendor_back_btn:
+                    self._vendor_back_btn.pack_forget()
+                if self._vendor_selected_label:
+                    self._vendor_selected_label.configure(text="")
+                self._refresh_vendors_panel()
                 self._refresh_devices_panel()
                 if self._info_label:
                     self._info_label.configure(text="Не подключено")
@@ -1289,7 +2430,7 @@ class RustPlusHubFeature(Feature):
                 map_size = event.payload.get("map_size")
                 if map_size:
                     self._map_size = int(map_size)
-                    self._minimap.set_team(self._team_cache, self._map_size)
+                    self._minimap.set_team(self._map_overlay_team(), self._map_size)
                 if self._info_label:
                     players = event.payload.get("players")
                     max_p = event.payload.get("max_players")
@@ -1319,15 +2460,13 @@ class RustPlusHubFeature(Feature):
             elif event.type == EventType.TEAM_INFO:
                 self._team_cache = event.payload.get("members", [])
                 self._refresh_team_panel(self._team_cache)
-                self._sync_map_overlays()
+                self._schedule_map_overlay_sync()
             elif event.type == EventType.MARKERS:
                 self._vendors_cache = event.payload.get("vendors", [])
                 self._events_cache = event.payload.get("events", [])
                 self._refresh_events_panel(self._events_cache)
-                query = self._vendor_search.get().strip() if self._vendor_search else ""
-                vendors = filter_vendors(self._vendors_cache, query) if query else self._vendors_cache
-                self._refresh_vendors_panel(vendors)
-                self._sync_map_overlays()
+                self._schedule_vendor_refresh()
+                self._schedule_map_overlay_sync()
             elif event.type == EventType.ENTITY_CHANGED:
                 entity_id = int(event.payload.get("entity_id", 0))
                 self._device_states[entity_id] = {
@@ -1342,7 +2481,7 @@ class RustPlusHubFeature(Feature):
                 path = event.payload.get("path")
                 if path:
                     self._show_map_preview(str(path))
-                    self._sync_map_overlays()
+                    self._schedule_map_overlay_sync()
             elif event.type == EventType.LIVE_ALERT:
                 self._append_alert(
                     str(event.payload.get("message", "Событие на сервере")),
@@ -1350,6 +2489,11 @@ class RustPlusHubFeature(Feature):
                 )
             elif event.type == EventType.DEVICE_PAIRED:
                 self._refresh_devices_panel()
+                self._refresh_groups_label()
+                self._set_status(
+                    f"Устройство добавлено: {event.payload.get('name', 'Device')} "
+                    f"(#{event.payload.get('entity_id', '?')})"
+                )
             elif event.type == EventType.CHAT_MESSAGE:
                 self._append_chat(
                     event.payload.get("name", "?"),

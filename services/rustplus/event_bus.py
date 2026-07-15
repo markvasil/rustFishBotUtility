@@ -57,8 +57,16 @@ class EventBus:
         for handler in self._handlers.get(event.type, []):
             try:
                 handler(event)
-            except Exception:
-                pass
+            except Exception as exc:
+                try:
+                    self._queue.put(
+                        RustPlusEvent(
+                            type=EventType.ERROR,
+                            payload={"message": f"Ошибка обработчика {event.type}: {exc}"},
+                        )
+                    )
+                except Exception:
+                    pass
 
     def dispatch_all_pending(self) -> None:
         for event in self.poll():

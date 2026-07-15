@@ -3,14 +3,14 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-import keyboard
-
+from overlay.hotkey_util import add_hotkey_precise
 from services.rustplus.connection_manager import ConnectionManager
 from services.rustplus.event_bus import EventBus, EventType
 from services.rustplus.fcm_bridge import FCMBridge
+from services.rustplus.item_icons import ItemIconCache
 from services.rustplus.map_renderer import MapRenderer
 from services.rustplus.steam_avatars import SteamAvatarCache
-from storage.rustplus_store import AlertSettings, AppSettings, PairedServer, RustPlusStore
+from storage.rustplus_store import AlertSettings, AppSettings, MapLayerSettings, PairedServer, RustPlusStore
 
 
 class RustPlusService:
@@ -22,6 +22,7 @@ class RustPlusService:
         self.fcm = FCMBridge(self.event_bus, self.store)
         self.connection = ConnectionManager(self.store, self.event_bus)
         self.map_renderer = MapRenderer()
+        self.item_icons = ItemIconCache()
         self.avatars = SteamAvatarCache()
         self.player_intel = self.connection._player_intel
         self._wire_events()
@@ -120,24 +121,38 @@ class RustPlusService:
             self._auto_connect_timer = None
         self.unload_device_hotkeys()
         self.connection.stop()
-        self.fcm.stop_listen()
+        self.fcm.stop_all()
 
     def reload_device_hotkeys(self) -> None:
         self.unload_device_hotkeys()
         for entry in self.store.list_device_hotkeys():
-            if not entry.hotkey or not entry.group_id:
+            if not entry.hotkey:
                 continue
             try:
-                handle = keyboard.add_hotkey(
-                    entry.hotkey,
-                    lambda gid=entry.group_id, act=entry.action: self.connection.toggle_group(gid, act),
-                    suppress=False,
-                )
+                if entry.group_id:
+                    handle = add_hotkey_precise(
+                        entry.hotkey,
+                        lambda gid=entry.group_id, act=entry.action: self.connection.toggle_group(gid, act),
+                        suppress=False,
+                    )
+                elif entry.device_id:
+                    device = next((d for d in self.store.list_devices() if d.id == entry.device_id), None)
+                    if not device:
+                        continue
+                    handle = add_hotkey_precise(
+                        entry.hotkey,
+                        lambda eid=device.entity_id, act=entry.action: self.connection.toggle_entity(eid, act),
+                        suppress=False,
+                    )
+                else:
+                    continue
                 self._hotkey_handles.append(handle)
             except Exception:
                 continue
 
     def unload_device_hotkeys(self) -> None:
+        import keyboard
+
         for handle in self._hotkey_handles:
             try:
                 keyboard.remove_hotkey(handle)
@@ -207,6 +222,9 @@ class RustPlusService:
 
     def update_alert_settings(self, alerts: AlertSettings) -> None:
         self.store.set_alert_settings(alerts)
+
+    def update_map_layers(self, layers: MapLayerSettings) -> None:
+        self.store.set_map_layers(layers)
 
     def update_app_settings(self, settings: AppSettings) -> None:
         self.store.set_settings(settings)
