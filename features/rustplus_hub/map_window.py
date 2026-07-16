@@ -14,6 +14,8 @@ from services.rustplus.map_renderer import MapRenderer
 class MapWindow:
     """Интерактивная карта: zoom/pan, follow, event tracking, рисование."""
 
+    TICK_MS = 100
+
     def __init__(
         self,
         root: ctk.CTk,
@@ -52,6 +54,9 @@ class MapWindow:
         self._drag_start: Optional[tuple[int, int]] = None
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._tick_job: Optional[str] = None
+        self._dirty = True
+        self._rendering = False
+        self._base_size: Optional[tuple[int, int]] = None
 
         self._win = ctk.CTkToplevel(root)
         self._win.title("Rust+ — карта сервера")
@@ -87,6 +92,7 @@ class MapWindow:
         self._canvas.bind("<Button-3>", self._on_right_click)
         self._win.bind("<KeyPress>", self._on_key)
         self._win.focus_force()
+        self._mark_dirty()
         self._render_frame()
         self._start_tick()
 
@@ -96,6 +102,14 @@ class MapWindow:
             return self._win.winfo_exists()
         except Exception:
             return False
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+
+    def _base_dimensions(self) -> tuple[int, int]:
+        if self._base_size is None:
+            self._base_size = self._renderer.get_base_size(self._path)
+        return self._base_size
 
     def update_state(
         self,
@@ -128,7 +142,7 @@ class MapWindow:
             self._follow_steam_id = follow_steam_id
         if map_size:
             self._map_size = map_size
-        self._render_frame()
+        self._mark_dirty()
 
     def close(self) -> None:
         if self._tick_job:
@@ -149,55 +163,63 @@ class MapWindow:
     def _start_tick(self) -> None:
         def tick():
             if self.is_open:
-                self._render_frame()
-                self._tick_job = self._win.after(50, tick)
-        self._tick_job = self._win.after(50, tick)
+                if self._follow_steam_id or self._dirty:
+                    self._render_frame()
+                self._tick_job = self._win.after(self.TICK_MS, tick)
+        self._tick_job = self._win.after(self.TICK_MS, tick)
 
     def _render_frame(self) -> None:
-        if not self.is_open:
+        if not self.is_open or self._rendering:
             return
-        cw = max(self._canvas.winfo_width(), 400)
-        ch = max(self._canvas.winfo_height(), 300)
-        projected_team = project_motion(self._team, map_size=self._map_size)
-        projected_events = project_motion(self._events, map_size=self._map_size)
-        projected_vendors = project_motion(self._vendors, map_size=self._map_size)
-        center = (self._pan_x, self._pan_y)
-        if self._follow_steam_id and self._map_size:
-            for member in projected_team:
-                if int(member.get("steam_id", 0)) == int(self._follow_steam_id):
-                    from services.rustplus.live_format import world_to_map_pixel
+        self._rendering = True
+        try:
+            cw = max(self._canvas.winfo_width(), 400)
+            ch = max(self._canvas.winfo_height(), 300)
+            projected_team = project_motion(self._team, map_size=self._map_size)
+            projected_events = project_motion(self._events, map_size=self._map_size)
+            projected_vendors = project_motion(self._vendors, map_size=self._map_size)
+            center = (self._pan_x, self._pan_y)
+            if self._follow_steam_id and self._map_size:
+                base_w, base_h = self._base_dimensions()
+                for member in projected_team:
+                    if int(member.get("steam_id", 0)) == int(self._follow_steam_id):
+                        from services.rustplus.live_format import world_to_map_pixel
 
-                    base = Image.open(self._path)
-                    px, py = world_to_map_pixel(
-                        float(member["x"]), float(member["y"]), self._map_size, base.width, base.height,
-                    )
-                    center = (float(px), float(py))
-                    break
+                        px, py = world_to_map_pixel(
+                            float(member["x"]), float(member["y"]), self._map_size, base_w, base_h,
+                        )
+                        center = (float(px), float(py))
+                        break
 
-        image = self._renderer.render(
-            self._path,
-            map_size=self._map_size,
-            team_members=projected_team,
-            death_markers=self._deaths,
-            drawings=self._drawings,
-            events=projected_events,
-            vendors=projected_vendors,
-            tracked_event_id=self._tracked_event_id,
-            follow_steam_id=None,
-            view_center=center,
-            zoom=self._zoom,
-            output_size=(cw, ch),
-        )
-        self._photo = ImageTk.PhotoImage(image)
-        self._canvas.delete("all")
-        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+            image = self._renderer.render(
+                self._path,
+                map_size=self._map_size,
+                team_members=projected_team,
+                death_markers=self._deaths,
+                drawings=self._drawings,
+                events=projected_events,
+                vendors=projected_vendors,
+                tracked_event_id=self._tracked_event_id,
+                follow_steam_id=None,
+                view_center=center,
+                zoom=self._zoom,
+                output_size=(cw, ch),
+            )
+            self._photo = ImageTk.PhotoImage(image)
+            self._canvas.delete("all")
+            self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+            self._dirty = False
+        finally:
+            self._rendering = False
 
     def _on_key(self, event) -> None:
         if event.keysym in ("KP_Add", "plus", "equal"):
             self._zoom = min(4.0, self._zoom + 0.15)
+            self._mark_dirty()
             self._render_frame()
         elif event.keysym in ("KP_Subtract", "minus"):
             self._zoom = max(1.0, self._zoom - 0.15)
+            self._mark_dirty()
             self._render_frame()
 
     def _on_press(self, event) -> None:
@@ -211,6 +233,7 @@ class MapWindow:
         self._drag_start = (event.x, event.y)
         self._pan_x += dx
         self._pan_y += dy
+        self._mark_dirty()
         self._render_frame()
 
     def _on_release(self, event) -> None:
@@ -226,14 +249,14 @@ class MapWindow:
     def _try_track_event(self, cx: int, cy: int) -> None:
         from services.rustplus.live_format import world_to_map_pixel
 
-        base = Image.open(self._path)
+        base_w, base_h = self._base_dimensions()
         best = None
         best_dist = 9999
         for event in self._events:
             x, y = event.get("x"), event.get("y")
             if x is None:
                 continue
-            px, py = world_to_map_pixel(float(x), float(y), self._map_size, base.width, base.height)
+            px, py = world_to_map_pixel(float(x), float(y), self._map_size, base_w, base_h)
             dist = abs(px - cx) + abs(py - cy)
             if dist < 24 and dist < best_dist:
                 best = event
@@ -241,20 +264,19 @@ class MapWindow:
         if best and self._on_track_event:
             self._on_track_event(int(best.get("id")))
             self._tracked_event_id = int(best.get("id"))
+            self._mark_dirty()
             self._render_frame()
 
     def _on_right_click(self, event) -> None:
         if not self._on_add_drawing or not self._map_size:
             return
-        from services.rustplus.live_format import world_to_map_pixel
 
-        base = Image.open(self._path)
-        w, h = base.size
+        base_w, base_h = self._base_dimensions()
         inv_zoom = self._zoom
-        px = int((event.x / max(self._canvas.winfo_width(), 1)) * w * inv_zoom)
-        py = int((event.y / max(self._canvas.winfo_height(), 1)) * h * inv_zoom)
-        wx = px / w * self._map_size
-        wy = self._map_size - py / h * self._map_size
+        px = int((event.x / max(self._canvas.winfo_width(), 1)) * base_w * inv_zoom)
+        py = int((event.y / max(self._canvas.winfo_height(), 1)) * base_h * inv_zoom)
+        wx = px / base_w * self._map_size
+        wy = self._map_size - py / base_h * self._map_size
         dialog = ctk.CTkInputDialog(text="Текст метки:", title="Метка на карте")
         text = dialog.get_input()
         if text:
