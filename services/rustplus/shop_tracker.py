@@ -9,11 +9,13 @@ class ShopTracker:
     def __init__(self) -> None:
         self._seen_ids: Set[int] = set()
         self._stock_state: Dict[int, bool] = {}
+        self._offer_stock_state: Dict[tuple[int, int, int, int, int], int] = {}
         self._primed = False
 
     def reset(self) -> None:
         self._seen_ids.clear()
         self._stock_state.clear()
+        self._offer_stock_state.clear()
         self._primed = False
 
     def detect_changes(
@@ -21,11 +23,14 @@ class ShopTracker:
         vendors: List[Dict[str, Any]],
         *,
         alerts_enabled: bool = True,
+        watched_item_ids: Optional[Set[int]] = None,
+        item_name_fn: Optional[Callable[[int], str]] = None,
     ) -> List[Dict[str, str]]:
         if not alerts_enabled:
             self._prime(vendors)
             return []
 
+        watched_item_ids = watched_item_ids or set()
         alerts: List[Dict[str, str]] = []
         current_ids = {int(v["id"]) for v in vendors if v.get("id") is not None}
 
@@ -64,6 +69,30 @@ class ShopTracker:
                 )
             self._stock_state[vid] = out
 
+            for order in vendor.get("sell_orders", []):
+                item_id = int(order.get("item_id", 0))
+                stock = int(order.get("amount_in_stock", 0))
+                offer_key = (
+                    vid,
+                    item_id,
+                    int(order.get("currency_id", 0)),
+                    int(order.get("cost_per_item", 0)),
+                    int(order.get("quantity", 0)),
+                )
+                prev_stock = self._offer_stock_state.get(offer_key)
+                if item_id in watched_item_ids and stock > 0 and (prev_stock is None or prev_stock <= 0):
+                    item_name = item_name_fn(item_id) if item_name_fn else str(item_id)
+                    alerts.append(
+                        {
+                            "title": "Watchlist",
+                            "message": (
+                                f"⭐ {item_name} доступен: "
+                                f"{vendor.get('name', 'Магазин')} [{vendor.get('grid', '?')}]"
+                            ),
+                        }
+                    )
+                self._offer_stock_state[offer_key] = stock
+
         for lost_id in self._seen_ids - current_ids:
             alerts.append({"title": "Магазин пропал", "message": f"❌ Магазин #{lost_id} исчез с карты"})
 
@@ -77,6 +106,21 @@ class ShopTracker:
             for v in vendors
             if v.get("id") is not None
         }
+        self._offer_stock_state = {}
+        for vendor in vendors:
+            vid = vendor.get("id")
+            if vid is None:
+                continue
+            vid = int(vid)
+            for order in vendor.get("sell_orders", []):
+                offer_key = (
+                    vid,
+                    int(order.get("item_id", 0)),
+                    int(order.get("currency_id", 0)),
+                    int(order.get("cost_per_item", 0)),
+                    int(order.get("quantity", 0)),
+                )
+                self._offer_stock_state[offer_key] = int(order.get("amount_in_stock", 0))
         self._primed = True
 
     def profit_trades(self, vendors: List[Dict[str, Any]], item_id: int) -> List[Dict[str, Any]]:

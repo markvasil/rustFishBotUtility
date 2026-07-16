@@ -536,6 +536,51 @@ class RustPlusStore:
         settings.map_layers = layers
         self.set_settings(settings)
 
+    def list_shop_watch_items(self, server_id: Optional[str] = None) -> List[int]:
+        raw = self._data.get("shop_watch_items", {})
+        if not isinstance(raw, dict):
+            return []
+        if not server_id:
+            server_id = self.get_active_server_id()
+        if not server_id:
+            return []
+        values = raw.get(server_id, [])
+        if not isinstance(values, list):
+            return []
+        out: List[int] = []
+        for value in values:
+            try:
+                out.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return sorted(set(out))
+
+    def set_shop_watch_items(self, server_id: str, item_ids: List[int]) -> None:
+        raw = self._data.get("shop_watch_items", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        cleaned = sorted({int(value) for value in item_ids if int(value)})
+        if cleaned:
+            raw[server_id] = cleaned
+        else:
+            raw.pop(server_id, None)
+        self._data["shop_watch_items"] = raw
+        self.save()
+
+    def add_shop_watch_item(self, server_id: str, item_id: int) -> List[int]:
+        items = self.list_shop_watch_items(server_id)
+        item_id = int(item_id)
+        if item_id not in items:
+            items.append(item_id)
+        self.set_shop_watch_items(server_id, items)
+        return self.list_shop_watch_items(server_id)
+
+    def remove_shop_watch_item(self, server_id: str, item_id: int) -> List[int]:
+        item_id = int(item_id)
+        items = [value for value in self.list_shop_watch_items(server_id) if value != item_id]
+        self.set_shop_watch_items(server_id, items)
+        return self.list_shop_watch_items(server_id)
+
     def list_device_groups(self, server_id: Optional[str] = None) -> List[DeviceGroup]:
         groups = [DeviceGroup.from_dict(item) for item in self._data.get("device_groups", [])]
         if server_id:
