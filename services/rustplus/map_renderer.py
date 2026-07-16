@@ -158,7 +158,8 @@ class MapRenderer:
     ) -> None:
         draw = ImageDraw.Draw(image)
         w, h = image.size
-        radius = max(6, min(w, h) // 40)
+        # Было min//40 (~100px на большой карте) — слишком крупно.
+        radius = max(5, min(w, h) // 90)
         font = self._font()
 
         for member in members:
@@ -208,21 +209,55 @@ class MapRenderer:
         markers: List[Dict[str, Any]],
         map_size: int,
     ) -> None:
-        draw = ImageDraw.Draw(image)
         w, h = image.size
+        # Маленький красный череп, не огромный крест.
+        skull_size = max(10, min(18, min(w, h) // 160))
+        skull = self._skull_icon(skull_size)
+        half = skull_size // 2
         for marker in markers:
             x, y = marker.get("x"), marker.get("y")
             if x is None or y is None:
                 continue
             px, py = world_to_map_pixel(float(x), float(y), map_size, w, h)
-            r = max(8, min(w, h) // 35)
-            draw.line((px - r, py - r, px + r, py + r), fill=(248, 113, 113, 255), width=3)
-            draw.line((px - r, py + r, px + r, py - r), fill=(248, 113, 113, 255), width=3)
-            draw.ellipse(
-                (px - r, py - r, px + r, py + r),
-                outline=(255, 255, 255, 200),
-                width=2,
-            )
+            image.paste(skull, (px - half, py - half), skull)
+
+    def _skull_icon(self, size: int) -> Image.Image:
+        cached = getattr(self, "_skull_cache", None)
+        if cached and cached[0] == size:
+            return cached[1]
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        red = (220, 38, 38, 255)
+        dark = (127, 29, 29, 255)
+        white = (254, 226, 226, 255)
+        # Череп: овальная голова
+        pad = max(1, size // 10)
+        draw.ellipse((pad, pad, size - pad - 1, int(size * 0.72)), fill=red, outline=dark)
+        # Челюсть
+        jaw_top = int(size * 0.52)
+        draw.rounded_rectangle(
+            (pad + 1, jaw_top, size - pad - 2, size - pad - 1),
+            radius=max(1, size // 6),
+            fill=red,
+            outline=dark,
+        )
+        # Глазницы
+        eye_y0 = int(size * 0.28)
+        eye_y1 = int(size * 0.48)
+        eye_w = max(2, size // 5)
+        draw.ellipse((int(size * 0.18), eye_y0, int(size * 0.18) + eye_w, eye_y1), fill=dark)
+        draw.ellipse((int(size * 0.58), eye_y0, int(size * 0.58) + eye_w, eye_y1), fill=dark)
+        # Нос
+        nx = size // 2
+        ny = int(size * 0.52)
+        draw.polygon([(nx, ny - max(1, size // 10)), (nx - max(1, size // 8), ny), (nx + max(1, size // 8), ny)], fill=dark)
+        # Зубы
+        teeth_y = int(size * 0.78)
+        for i in range(3):
+            tx = int(size * 0.28) + i * max(2, size // 5)
+            draw.line((tx, teeth_y, tx, size - pad - 2), fill=white, width=max(1, size // 12))
+        self._skull_cache = (size, img)
+        return img
 
     def _draw_drawings(
         self,
@@ -260,9 +295,65 @@ class MapRenderer:
                 continue
             px, py = world_to_map_pixel(float(x), float(y), map_size, w, h)
             is_tracked = tracked_id is not None and event.get("id") == tracked_id
+            try:
+                marker_type = int(event.get("type") or 0)
+            except (TypeError, ValueError):
+                marker_type = 0
+
+            # Карго и остальные события — маленькая иконка ровно в точке координат
+            # (большой спрайт визуально «уезжал» от реальной позиции).
+            if marker_type in (2, 4, 5, 6, 8):
+                size = 78 if marker_type == 5 else 24  # карго крупнее, центр всё ещё в точке
+                icon = self._event_icon(event, size)
+                if icon is not None:
+                    image.paste(icon, (px - icon.width // 2, py - icon.height // 2), icon)
+                    # Точный пип в центре — как прежняя точка.
+                    pip = 3 if is_tracked else 2
+                    pip_color = (96, 165, 250, 255) if is_tracked else (255, 255, 255, 230)
+                    draw.ellipse(
+                        (px - pip, py - pip, px + pip, py + pip),
+                        fill=pip_color,
+                        outline=(15, 17, 23, 220),
+                        width=1,
+                    )
+                    continue
+
             color = (96, 165, 250, 255) if is_tracked else (110, 231, 255, 200)
             r = 10 if is_tracked else 7
             draw.ellipse((px - r, py - r, px + r, py + r), fill=color, outline=(255, 255, 255, 220), width=2)
+
+    def _event_icon(self, event: Dict[str, Any], size: int) -> Optional[Image.Image]:
+        try:
+            marker_type = int(event.get("type") or 0)
+        except (TypeError, ValueError):
+            return None
+        if marker_type not in (2, 4, 5, 6, 8):
+            return None
+        try:
+            from importlib import resources
+
+            from rustplus.utils.utils import ICONS_PATH
+
+            name_to_file = {
+                2: "explosion.png",
+                4: "chinook.png",
+                5: "cargo.png",
+                6: "crate.png",
+                8: "patrol.png",
+            }
+            with resources.path(ICONS_PATH, name_to_file[marker_type]) as path:
+                icon = Image.open(path).convert("RGBA")
+        except Exception:
+            return None
+        icon = icon.resize((size, size), Image.Resampling.LANCZOS)
+        try:
+            angle = float(event.get("rotation") or 0.0)
+        except (TypeError, ValueError):
+            angle = 0.0
+        if abs(angle) > 0.5:
+            # expand=True + paste по центру bbox — центр вращения остаётся в (px, py).
+            icon = icon.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+        return icon
 
     def _draw_vendors(self, image: Image.Image, vendors: List[Dict[str, Any]], map_size: int) -> None:
         draw = ImageDraw.Draw(image)

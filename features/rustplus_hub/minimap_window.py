@@ -8,14 +8,14 @@ import customtkinter as ctk
 from PIL import Image
 
 from services.rustplus.map_renderer import MapRenderer
-from services.rustplus.live_format import project_motion
+from services.rustplus.live_format import has_active_motion, project_motion
 
 
 class MinimapWindow:
     """Компактная карта поверх игры (always-on-top) с drag и оверлеями."""
 
     PREVIEW_SIZE = (300, 300)
-    MOVE_REFRESH_MS = 400
+    MOVE_REFRESH_MS = 120
 
     def __init__(
         self,
@@ -43,9 +43,11 @@ class MinimapWindow:
         self._drag_offset: Optional[tuple[int, int]] = None
         self._renderer = renderer or MapRenderer()
         self._render_job: Optional[str] = None
+        self._motion_tick_job: Optional[str] = None
         self._render_delay_ms = 1200
         self._render_token = 0
         self._rendering = False
+        self._pil_ref = None
 
     @property
     def is_visible(self) -> bool:
@@ -80,20 +82,42 @@ class MinimapWindow:
         if tracked_event_id is not None:
             self._tracked_event_id = tracked_event_id
         if self.is_visible and self._path:
-            delay = self.MOVE_REFRESH_MS if self._has_moving_overlay() else self._render_delay_ms
-            self._schedule_apply_image(delay)
+            if self._has_moving_overlay():
+                self._ensure_motion_tick()
+                self._schedule_apply_image(self.MOVE_REFRESH_MS)
+            else:
+                self._stop_motion_tick()
+                self._schedule_apply_image(self._render_delay_ms)
 
     def _has_moving_overlay(self) -> bool:
         for group in (self._team_members, self._events, self._vendors):
             for item in group:
-                try:
-                    if abs(float(item.get("_vx") or 0.0)) > 0.05:
-                        return True
-                    if abs(float(item.get("_vy") or 0.0)) > 0.05:
-                        return True
-                except (TypeError, ValueError):
-                    continue
+                if has_active_motion(item):
+                    return True
         return False
+
+    def _ensure_motion_tick(self) -> None:
+        if self._motion_tick_job:
+            return
+
+        def tick() -> None:
+            self._motion_tick_job = None
+            if not self.is_visible or not self._path:
+                return
+            if not self._has_moving_overlay():
+                return
+            self._schedule_apply_image(0)
+            self._motion_tick_job = self._root.after(self.MOVE_REFRESH_MS, tick)
+
+        self._motion_tick_job = self._root.after(self.MOVE_REFRESH_MS, tick)
+
+    def _stop_motion_tick(self) -> None:
+        if self._motion_tick_job:
+            try:
+                self._root.after_cancel(self._motion_tick_job)
+            except Exception:
+                pass
+            self._motion_tick_job = None
 
     def _schedule_apply_image(self, delay_ms: Optional[int] = None) -> None:
         if self._render_job:
@@ -138,11 +162,13 @@ class MinimapWindow:
         elif self._label:
             self._label.configure(text="Подготовка миникарты…", image=None)
 
-        self._apply_image(self._path)
+        self._apply_image(self._path, show_busy=True)
         self._place_window()
         self._win.deiconify()
         self._win.lift()
         self._visible = True
+        if self._has_moving_overlay():
+            self._ensure_motion_tick()
 
     def update(
         self,
@@ -158,6 +184,7 @@ class MinimapWindow:
     def hide(self) -> None:
         self._visible = False
         self._drag_offset = None
+        self._stop_motion_tick()
         if self._render_job:
             self._root.after_cancel(self._render_job)
             self._render_job = None
@@ -167,6 +194,7 @@ class MinimapWindow:
     def destroy(self) -> None:
         self._visible = False
         self._drag_offset = None
+        self._stop_motion_tick()
         if self._render_job:
             self._root.after_cancel(self._render_job)
             self._render_job = None
@@ -216,12 +244,13 @@ class MinimapWindow:
         if self._on_position_changed:
             self._on_position_changed(x, y)
 
-    def _apply_image(self, path: str) -> None:
-        if not self._label:
+    def _apply_image(self, path: str, *, show_busy: bool = False) -> None:
+        if not self._label or self._rendering:
             return
+        self._rendering = True
         self._render_token += 1
         token = self._render_token
-        if self._label:
+        if show_busy and self._label:
             self._label.configure(text="Обновление миникарты…", image=None)
 
         def worker() -> None:
@@ -229,19 +258,38 @@ class MinimapWindow:
                 image = self._render_image(path)
                 image.thumbnail(self.PREVIEW_SIZE, Image.Resampling.LANCZOS)
             except Exception as exc:
-                self._root.after(0, lambda: self._show_render_error(str(exc), token))
+                self._root.after(0, lambda: self._finish_render_error(str(exc), token))
                 return
-            self._root.after(0, lambda: self._show_rendered_image(image, token))
+            self._root.after(0, lambda: self._finish_render_ok(image, token))
 
         threading.Thread(target=worker, daemon=True, name="MinimapRender").start()
+
+    def _finish_render_ok(self, image: Image.Image, token: int) -> None:
+        self._rendering = False
+        self._show_rendered_image(image, token)
+
+    def _finish_render_error(self, message: str, token: int) -> None:
+        self._rendering = False
+        self._show_render_error(message, token)
 
     def _show_rendered_image(self, image: Image.Image, token: int) -> None:
         if token != self._render_token or not self._label:
             return
-        self._image_ref = ctk.CTkImage(
-            light_image=image, dark_image=image, size=image.size,
-        )
-        self._label.configure(image=self._image_ref, text="")
+        try:
+            image = image.convert("RGB").copy()
+            self._pil_ref = image
+            new_ref = ctk.CTkImage(
+                light_image=image,
+                dark_image=image.copy(),
+                size=(image.width, image.height),
+            )
+            self._label.configure(image=new_ref, text="")
+            self._image_ref = new_ref
+        except Exception as exc:
+            try:
+                self._label.configure(image="", text=str(exc), text_color="#f87171")
+            except Exception:
+                pass
 
     def _show_render_error(self, message: str, token: int) -> None:
         if token != self._render_token or not self._label:

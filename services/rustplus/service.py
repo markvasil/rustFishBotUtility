@@ -117,7 +117,24 @@ class RustPlusService:
         self.item_icons.refresh_catalog_async()
         if self.store.has_fcm_config() and self.fcm.runtime_ready():
             self.fcm.start_listen()
+        self._restore_last_connection()
 
+    def _restore_last_connection(self) -> None:
+        """При старте сразу подключаемся к серверу, который был активен при выходе."""
+        if self.connection.is_connected:
+            return
+        server_id = self.store.get_active_server_id()
+        if not server_id:
+            return
+        server = self.store.get_server(server_id)
+        if not server:
+            return
+        self.event_bus.emit(
+            EventType.STATUS,
+            message=f"Автоподключение к {server.name}…",
+            server_id=server.id,
+        )
+        self.connect_server(server)
     def stop(self) -> None:
         if self._auto_connect_timer:
             self._auto_connect_timer.cancel()
