@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -25,6 +26,7 @@ from features.rustplus_hub.ui_theme import (
 from features.rustplus_hub.camera_window import CameraWindow
 from features.rustplus_hub.map_window import MapWindow
 from features.rustplus_hub.minimap_window import MinimapWindow
+from overlay.busy_state import BusyButton, BusyLabel, OperationRegistry
 from overlay.key_capture import KeyCapture
 from overlay.hotkey_util import hotkey_label
 from services.rustplus.event_bus import EventType, RustPlusEvent
@@ -131,6 +133,20 @@ class RustPlusHubFeature(Feature):
         self._camera_input: Optional[ctk.StringVar] = None
         self._alerts_frame: Optional[ctk.CTkFrame] = None
         self._alerts_log: List[str] = []
+        self._ops = OperationRegistry()
+        self._connecting_server_id: Optional[str] = None
+        self._fcm_chrome_btn: Optional[BusyButton] = None
+        self._fcm_edge_btn: Optional[BusyButton] = None
+        self._fcm_reset_btn: Optional[BusyButton] = None
+        self._listener_start_btn: Optional[BusyButton] = None
+        self._listener_stop_btn: Optional[BusyButton] = None
+        self._map_fetch_btn: Optional[BusyButton] = None
+        self._map_busy_label: Optional[BusyLabel] = None
+        self._devices_refresh_btn: Optional[BusyButton] = None
+        self._devices_busy_label: Optional[BusyLabel] = None
+        self._chat_send_btn: Optional[BusyButton] = None
+        self._profit_btn: Optional[BusyButton] = None
+        self._connect_buttons: Dict[str, BusyButton] = {}
 
         for event_type in EventType:
             self._service.event_bus.subscribe(event_type, self._on_event)
@@ -209,16 +225,33 @@ class RustPlusHubFeature(Feature):
         def step1(body: ctk.CTkFrame) -> None:
             row = ctk.CTkFrame(body, fg_color="transparent")
             row.pack(fill="x")
-            btn_primary(row, "Steam Chrome", lambda: self._register_fcm("chrome"), width=118).pack(side="left", padx=(0, 6))
-            btn_secondary(row, "Steam Edge", lambda: self._register_fcm("edge"), width=118).pack(side="left", padx=(0, 6))
-            btn_danger(row, "Сброс", self._reset_fcm, width=72).pack(side="left")
+            self._fcm_chrome_btn = BusyButton(
+                btn_primary(row, "Steam Chrome", lambda: self._register_fcm("chrome"), width=118)
+            )
+            self._fcm_chrome_btn.widget.pack(side="left", padx=(0, 6))
+            self._fcm_edge_btn = BusyButton(
+                btn_secondary(row, "Steam Edge", lambda: self._register_fcm("edge"), width=118)
+            )
+            self._fcm_edge_btn.widget.pack(side="left", padx=(0, 6))
+            self._fcm_reset_btn = BusyButton(btn_danger(row, "Сброс", self._reset_fcm, width=72))
+            self._fcm_reset_btn.widget.pack(side="left")
+            self._fcm_busy_label = BusyLabel(body)
+            self._fcm_busy_label.pack(anchor="w", pady=(4, 0))
             hint_label(body, "Разрешите popups для localhost. При ошибке login попробуйте Edge.")
 
         def step2(body: ctk.CTkFrame) -> None:
             row = ctk.CTkFrame(body, fg_color="transparent")
             row.pack(fill="x")
-            btn_primary(row, "Старт listener", self._start_listener, width=120).pack(side="left", padx=(0, 6))
-            btn_secondary(row, "Стоп", self._stop_listener, width=80).pack(side="left")
+            self._listener_start_btn = BusyButton(
+                btn_primary(row, "Старт listener", self._start_listener, width=120)
+            )
+            self._listener_start_btn.widget.pack(side="left", padx=(0, 6))
+            self._listener_stop_btn = BusyButton(
+                btn_secondary(row, "Стоп", self._stop_listener, width=80)
+            )
+            self._listener_stop_btn.widget.pack(side="left")
+            self._listener_busy_label = BusyLabel(body)
+            self._listener_busy_label.pack(anchor="w", pady=(4, 0))
             hint_label(body, "После Pair Server нажмите Resend notification (listener активен).", warn=True)
             hint_label(body, "Закройте мобильный Rust+ — одновременная работа ломает паринг.", warn=True)
 
@@ -334,7 +367,10 @@ class RustPlusHubFeature(Feature):
             corner_radius=8,
         )
         self._chat_input.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        btn_primary(chat_row, "Отправить", self._send_chat, width=100, height=32).pack(side="left")
+        self._chat_send_btn = BusyButton(
+            btn_primary(chat_row, "Отправить", self._send_chat, width=100, height=32)
+        )
+        self._chat_send_btn.widget.pack(side="left")
 
     def _build_map_tab(self, parent: ctk.CTkFrame) -> None:
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
@@ -474,19 +510,48 @@ class RustPlusHubFeature(Feature):
         ).pack(anchor="w", padx=10, pady=10)
 
     def _build_devices_section(self, parent: ctk.CTkScrollableFrame) -> None:
-        section_header(
-            parent,
-            "Умные устройства",
-            "Switch, Alarm, Storage Monitor",
-            action_text="Обновить",
-            action_command=self._refresh_devices_action,
+        head = ctk.CTkFrame(parent, fg_color="transparent")
+        head.pack(fill="x", padx=4, pady=(10, 6))
+        ctk.CTkLabel(
+            head,
+            text="Умные устройства",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=Theme.TEXT,
+            anchor="w",
+        ).pack(side="left")
+        ctk.CTkLabel(
+            head,
+            text="Switch, Alarm, Storage Monitor",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+            anchor="w",
+        ).pack(side="left", padx=(8, 0))
+        self._devices_refresh_btn = BusyButton(
+            btn_secondary(head, "Обновить", self._refresh_devices_action, width=110, height=26)
         )
+        self._devices_refresh_btn.widget.pack(side="right")
+        self._devices_busy_label = BusyLabel(parent)
+        self._devices_busy_label.pack(anchor="w", padx=8)
         self._devices_frame = panel(parent)
         self._devices_frame.pack(fill="x", padx=4, pady=(0, 8))
         self._refresh_devices_panel()
 
+    def _end_devices_refresh(self) -> None:
+        self._ops.release("devices_refresh")
+        if self._devices_refresh_btn:
+            self._devices_refresh_btn.end()
+        if self._devices_busy_label:
+            self._devices_busy_label.set("")
+
     def _refresh_devices_action(self) -> None:
         """Подтянуть пропущенные Pair из лога + опросить состояние."""
+        if not self._ops.acquire("devices_refresh"):
+            return
+        if self._devices_refresh_btn:
+            self._devices_refresh_btn.begin("Обновляем")
+        if self._devices_busy_label:
+            self._devices_busy_label.set("Читаем pairing.log и опрашиваем устройства…")
+
         server = self._service.get_active_server() or self._service.connection.connected_server
         server_id = server.id if server else None
         added = self._service.store.sync_devices_from_pairing_log(server_id)
@@ -499,6 +564,7 @@ class RustPlusHubFeature(Feature):
             self._set_status(f"Добавлено устройств из pairing: {added}")
         else:
             self._set_status("Устройства обновлены")
+        self._root.after(1200, self._end_devices_refresh)
 
     def _build_cameras_section(self, parent: ctk.CTkScrollableFrame) -> None:
         self._section_title(parent, "Камеры", "CCTV / PTZ — DOME1, OILRIG1L1…")
@@ -526,9 +592,14 @@ class RustPlusHubFeature(Feature):
         self._section_title(parent, "Карта", "Миникарта: ЛКМ drag, ПКМ скрыть")
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=4, pady=(0, 6))
-        btn_secondary(row, "Загрузить", lambda: self._service.fetch_map(), width=100, height=30).pack(side="left", padx=(0, 4))
+        self._map_fetch_btn = BusyButton(
+            btn_secondary(row, "Загрузить", self._fetch_map_action, width=100, height=30)
+        )
+        self._map_fetch_btn.widget.pack(side="left", padx=(0, 4))
         btn_primary(row, "Крупно", self._open_map_window, width=90, height=30).pack(side="left", padx=(0, 4))
         btn_secondary(row, "Миникарта", self._toggle_minimap, width=100, height=30).pack(side="left")
+        self._map_busy_label = BusyLabel(parent)
+        self._map_busy_label.pack(anchor="w", padx=8, pady=(0, 4))
 
         layers = self._service.store.get_map_layers()
         self._map_layer_vars = {
@@ -817,7 +888,10 @@ class RustPlusHubFeature(Feature):
             profit_row, textvariable=self._profit_item_var, width=100, height=28,
             placeholder_text="напр. -151838493", corner_radius=8,
         ).pack(side="left", padx=(0, 6))
-        btn_secondary(profit_row, "Найти маршрут", self._show_profit, width=110, height=28).pack(side="left")
+        self._profit_btn = BusyButton(
+            btn_secondary(profit_row, "Найти маршрут", self._show_profit, width=110, height=28)
+        )
+        self._profit_btn.widget.pack(side="left")
         self._profit_label = ctk.CTkLabel(
             shop_body, text="", font=ctk.CTkFont(size=10), text_color=Theme.MUTED, anchor="w", wraplength=500,
         )
@@ -1074,8 +1148,17 @@ class RustPlusHubFeature(Feature):
         if not follow:
             self._intel_label.configure(text="Нет данных (укажите Follow Steam ID)")
             return
-        prediction = self._service.predict_online(int(follow))
-        heat = self._service.heatmap(int(follow))
+        self._intel_label.configure(text="Считаем локальную статистику…")
+        sid = int(follow)
+
+        def worker() -> None:
+            prediction = self._service.predict_online(sid)
+            heat = self._service.heatmap(sid)
+            self._root.after(0, lambda: self._apply_player_intel(prediction, heat))
+
+        threading.Thread(target=worker, daemon=True, name="PlayerIntel").start()
+
+    def _apply_player_intel(self, prediction: Optional[str], heat: Dict[int, int]) -> None:
         top_hours = sorted(heat.items(), key=lambda x: -x[1])[:3]
         heat_text = ", ".join(f"{h}:00×{c}" for h, c in top_hours if c)
         text = prediction or "Мало данных"
@@ -1118,7 +1201,24 @@ class RustPlusHubFeature(Feature):
         if not raw.isdigit():
             self._set_status("Укажите числовой item id", error=True)
             return
-        trades = self._service.profit_trades(int(raw))
+        if self._ops.is_busy("profit_search"):
+            return
+        self._ops.acquire("profit_search")
+        if self._profit_btn:
+            self._profit_btn.begin("Считаю")
+        self._profit_label.configure(text="Ищем маршруты…")
+        item_id = int(raw)
+
+        def worker() -> None:
+            trades = self._service.profit_trades(item_id)
+            self._root.after(0, lambda: self._apply_profit_result(trades))
+
+        threading.Thread(target=worker, daemon=True, name="ProfitSearch").start()
+
+    def _apply_profit_result(self, trades) -> None:
+        self._ops.release("profit_search")
+        if self._profit_btn:
+            self._profit_btn.end()
         if not trades:
             self._profit_label.configure(text="Нет выгодных маршрутов")
             return
@@ -2495,6 +2595,7 @@ class RustPlusHubFeature(Feature):
         if not self._map_preview:
             return
         self._map_path = path
+        self._service.map_renderer.invalidate_base(path)
         try:
             image = Image.open(path)
             image.thumbnail(self.MAP_PREVIEW_MAX, Image.Resampling.LANCZOS)
@@ -2507,6 +2608,7 @@ class RustPlusHubFeature(Feature):
             self._schedule_map_overlay_sync()
         except Exception:
             self._map_preview.configure(text="Не удалось показать карту")
+        self._end_map_fetch()
         self.request_resize()
 
     def on_hide(self) -> None:
@@ -2559,26 +2661,107 @@ class RustPlusHubFeature(Feature):
         warn = self._service.store.fcm_expiry_warning()
         if self._status_label:
             self._status_label.configure(text=warn or "", text_color=Theme.WARN if warn else Theme.DIM)
+        self._update_fcm_busy_ui()
+
+    def _update_fcm_busy_ui(self) -> None:
+        registering = self._service.fcm.is_registering
+        listening = self._service.fcm.is_listening
+        for btn in (self._fcm_chrome_btn, self._fcm_edge_btn, self._fcm_reset_btn):
+            if not btn:
+                continue
+            if registering:
+                btn.begin()
+            else:
+                btn.end()
+        if getattr(self, "_fcm_busy_label", None):
+            self._fcm_busy_label.set(
+                "Идёт регистрация в браузере…" if registering else ""
+            )
+        if self._listener_start_btn:
+            if listening or self._ops.is_busy("listener_start"):
+                self._listener_start_btn.begin()
+            else:
+                self._listener_start_btn.end()
+        if self._listener_stop_btn:
+            if self._ops.is_busy("listener_stop"):
+                self._listener_stop_btn.begin()
+            else:
+                self._listener_stop_btn.end()
+        if getattr(self, "_listener_busy_label", None):
+            if listening:
+                self._listener_busy_label.set("Listener активен — ждём Pair/Resend")
+            elif self._ops.is_busy("listener_start"):
+                self._listener_busy_label.set("Запускаем listener…")
+            else:
+                self._listener_busy_label.set("")
+
+    def _fetch_map_action(self) -> None:
+        if not self._ops.acquire("map_fetch"):
+            return
+        if self._map_fetch_btn:
+            self._map_fetch_btn.begin("Загрузка")
+        if self._map_busy_label:
+            self._map_busy_label.set("Загрузка карты с сервера…")
+        if self._map_preview:
+            self._map_preview.configure(text="Загрузка карты…", image=None)
+        self._service.fetch_map()
+
+    def _end_map_fetch(self) -> None:
+        self._ops.release("map_fetch")
+        if self._map_fetch_btn:
+            self._map_fetch_btn.end()
+        if self._map_busy_label:
+            self._map_busy_label.set("")
+
+    def _end_connect(self) -> None:
+        self._connecting_server_id = None
+        for btn in self._connect_buttons.values():
+            btn.end()
 
     def _register_fcm(self, browser: str = "auto") -> None:
+        if self._service.fcm.is_registering:
+            return
         ok, msg = self._service.fcm.register(browser=browser)
         self._set_status(msg, error=not ok)
+        self._update_fcm_busy_ui()
+        if ok:
+            self._poll_fcm_registration()
+
+    def _poll_fcm_registration(self) -> None:
+        if self._service.fcm.is_registering:
+            self._update_fcm_busy_ui()
+            self._root.after(400, self._poll_fcm_registration)
+            return
+        self._update_fcm_busy_ui()
         self._refresh_status()
 
     def _reset_fcm(self) -> None:
+        if self._service.fcm.is_registering:
+            return
         self._service.fcm.stop_listen()
         self._service.fcm.reset_config()
         self._refresh_status()
+        self._update_fcm_busy_ui()
         self._set_status("FCM config сброшен. Зарегистрируйтесь заново.")
 
     def _start_listener(self) -> None:
+        if not self._ops.acquire("listener_start"):
+            return
+        self._update_fcm_busy_ui()
         ok, msg = self._service.fcm.start_listen()
+        self._ops.release("listener_start")
         self._set_status(msg, error=not ok)
         self._refresh_status()
+        self._update_fcm_busy_ui()
 
     def _stop_listener(self) -> None:
+        if not self._ops.acquire("listener_stop"):
+            return
+        self._update_fcm_busy_ui()
         self._service.fcm.stop_listen()
+        self._ops.release("listener_stop")
         self._refresh_status()
+        self._update_fcm_busy_ui()
 
     def _servers_block_height(self, count: int) -> int:
         if count <= 0:
@@ -2597,6 +2780,7 @@ class RustPlusHubFeature(Feature):
     def _refresh_servers(self) -> None:
         if not self._servers_frame:
             return
+        self._connect_buttons.clear()
         self._service.store.load()
         for w in self._servers_frame.winfo_children():
             w.destroy()
@@ -2647,9 +2831,15 @@ class RustPlusHubFeature(Feature):
                 width=52,
             ).pack(side="right", padx=(0, 4))
         else:
-            btn_secondary(
-                actions, "Connect", lambda s=server: self._connect(s), width=72, height=28,
-            ).pack(side="right")
+            connect_busy = BusyButton(
+                btn_secondary(
+                    actions, "Connect", lambda s=server: self._connect(s), width=72, height=28,
+                )
+            )
+            if self._connecting_server_id == server.id:
+                connect_busy.begin("…")
+            connect_busy.widget.pack(side="right")
+            self._connect_buttons[server.id] = connect_busy
 
         mark = "● " if is_active else ""
         display_name = server.name if len(server.name) <= 34 else server.name[:31] + "..."
@@ -2684,6 +2874,12 @@ class RustPlusHubFeature(Feature):
         self._set_status(f"Сервер {name} добавлен вручную")
 
     def _connect(self, server: PairedServer) -> None:
+        if self._connecting_server_id:
+            return
+        self._connecting_server_id = server.id
+        btn = self._connect_buttons.get(server.id)
+        if btn:
+            btn.begin("…")
         self._service.connect_server(server)
         self._set_status(f"Подключение к {server.name}...")
 
@@ -2703,8 +2899,18 @@ class RustPlusHubFeature(Feature):
         text = self._chat_input.get().strip()
         if not text:
             return
+        if not self._ops.acquire("chat_send"):
+            return
+        if self._chat_send_btn:
+            self._chat_send_btn.begin("…")
         self._service.connection.send_team_message(text)
         self._chat_input.delete(0, "end")
+        self._root.after(600, self._end_chat_send)
+
+    def _end_chat_send(self) -> None:
+        self._ops.release("chat_send")
+        if self._chat_send_btn:
+            self._chat_send_btn.end()
 
     def _set_status(self, message: str, error: bool = False) -> None:
         if self._status_label:
@@ -2735,6 +2941,11 @@ class RustPlusHubFeature(Feature):
         elif event.type == EventType.ERROR:
             msg = str(event.payload.get("message", "Ошибка"))
             self._set_status(msg, error=True)
+            if "Подключение" in msg or "подключ" in msg.lower():
+                self._end_connect()
+                self._refresh_servers()
+            if self._ops.is_busy("map_fetch"):
+                self._end_map_fetch()
             if "Камера" in msg:
                 self._overlay.show_live_alert(msg)
                 if self._camera_window and self._camera_window.is_open:
@@ -2743,6 +2954,7 @@ class RustPlusHubFeature(Feature):
         elif event.type == EventType.SERVER_PAIRED:
             self._refresh_servers()
         elif event.type == EventType.CONNECTED:
+            self._end_connect()
             self._refresh_servers()
             self._refresh_status()
             self._service.store.sync_devices_from_pairing_log(
@@ -2754,6 +2966,7 @@ class RustPlusHubFeature(Feature):
                 self._info_label.configure(text=f"Подключено: {event.payload.get('name', '')}")
             self._set_status(f"Подключено к {event.payload.get('name', '')}")
         elif event.type == EventType.DISCONNECTED:
+            self._end_connect()
             self._refresh_status()
             self._vendors_cache = []
             self._vendor_page = 0
