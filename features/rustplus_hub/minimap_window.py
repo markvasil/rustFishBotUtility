@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -42,6 +43,8 @@ class MinimapWindow:
         self._renderer = renderer or MapRenderer()
         self._render_job: Optional[str] = None
         self._render_delay_ms = 1200
+        self._render_token = 0
+        self._rendering = False
 
     @property
     def is_visible(self) -> bool:
@@ -111,11 +114,14 @@ class MinimapWindow:
             self._win.attributes("-topmost", True)
             self._win.attributes("-alpha", 0.88)
             self._win.configure(fg_color="#0d1117")
-            self._label = ctk.CTkLabel(self._win, text="", cursor="fleur")
+        if self._label is None:
+            self._label = ctk.CTkLabel(self._win, text="Подготовка миникарты…", cursor="fleur")
             self._label.pack(padx=4, pady=4)
             self._bind_drag(self._win)
             self._bind_drag(self._label)
             self._win.bind("<Button-3>", lambda _e: self.hide())
+        elif self._label:
+            self._label.configure(text="Подготовка миникарты…", image=None)
 
         self._apply_image(self._path)
         self._place_window()
@@ -198,15 +204,34 @@ class MinimapWindow:
     def _apply_image(self, path: str) -> None:
         if not self._label:
             return
-        try:
-            image = self._render_image(path)
-            image.thumbnail(self.PREVIEW_SIZE, Image.Resampling.LANCZOS)
-            self._image_ref = ctk.CTkImage(
-                light_image=image, dark_image=image, size=image.size,
-            )
-            self._label.configure(image=self._image_ref, text="")
-        except Exception as exc:
-            self._label.configure(image=None, text=str(exc), text_color="#f87171")
+        self._render_token += 1
+        token = self._render_token
+        if self._label:
+            self._label.configure(text="Обновление миникарты…", image=None)
+
+        def worker() -> None:
+            try:
+                image = self._render_image(path)
+                image.thumbnail(self.PREVIEW_SIZE, Image.Resampling.LANCZOS)
+            except Exception as exc:
+                self._root.after(0, lambda: self._show_render_error(str(exc), token))
+                return
+            self._root.after(0, lambda: self._show_rendered_image(image, token))
+
+        threading.Thread(target=worker, daemon=True, name="MinimapRender").start()
+
+    def _show_rendered_image(self, image: Image.Image, token: int) -> None:
+        if token != self._render_token or not self._label:
+            return
+        self._image_ref = ctk.CTkImage(
+            light_image=image, dark_image=image, size=image.size,
+        )
+        self._label.configure(image=self._image_ref, text="")
+
+    def _show_render_error(self, message: str, token: int) -> None:
+        if token != self._render_token or not self._label:
+            return
+        self._label.configure(image=None, text=message, text_color="#f87171")
 
     def _render_image(self, path: str) -> Image.Image:
         return self._renderer.render(

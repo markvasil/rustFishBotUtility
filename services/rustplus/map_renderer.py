@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
@@ -71,9 +73,34 @@ class MapRenderer:
 
     def __init__(self) -> None:
         self._avatar_cache: Dict[int, Image.Image] = {}
+        self._base_cache: Dict[str, Tuple[float, Image.Image]] = {}
+        self._avatar_lock = threading.Lock()
 
     def set_avatar(self, steam_id: int, image: Image.Image) -> None:
-        self._avatar_cache[int(steam_id)] = image
+        with self._avatar_lock:
+            self._avatar_cache[int(steam_id)] = image
+
+    def invalidate_base(self, base_path: Optional[str] = None) -> None:
+        if base_path is None:
+            self._base_cache.clear()
+            return
+        self._base_cache.pop(str(base_path), None)
+
+    def get_base_size(self, base_path: str) -> Tuple[int, int]:
+        image = self._load_base(base_path)
+        return image.size
+
+    def _load_base(self, base_path: str) -> Image.Image:
+        path = Path(base_path)
+        mtime = path.stat().st_mtime if path.exists() else 0.0
+        cached = self._base_cache.get(str(base_path))
+        if cached and cached[0] == mtime:
+            return cached[1].copy()
+        image = Image.open(base_path)
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        self._base_cache[str(base_path)] = (mtime, image.copy())
+        return image
 
     def render(
         self,
@@ -93,10 +120,7 @@ class MapRenderer:
         show_avatars: bool = True,
         cluster_shops: bool = True,
     ) -> Image.Image:
-        image = Image.open(base_path)
-        if image.mode != "RGBA":
-            image = image.convert("RGBA")
-
+        image = self._load_base(base_path)
         width, height = image.size
         if map_size and team_members:
             self._draw_team(image, team_members, map_size, show_avatars)
@@ -143,7 +167,10 @@ class MapRenderer:
                 continue
             px, py = world_to_map_pixel(float(x), float(y), map_size, w, h)
             steam_id = int(member.get("steam_id", 0))
-            avatar = self._avatar_cache.get(steam_id) if show_avatars else None
+            avatar = None
+            if show_avatars:
+                with self._avatar_lock:
+                    avatar = self._avatar_cache.get(steam_id)
 
             if avatar:
                 size = radius * 2
