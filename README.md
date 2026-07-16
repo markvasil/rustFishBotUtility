@@ -71,17 +71,34 @@ Live-компаньон к серверу через официальный **Ru
 3. **Старт listener** → в игре **Pair Server** → **Resend notification**
 4. **Connect** (нужно быть на сервере в игре; закройте мобильный Rust+)
 
-**Что умеет:**
+**Что умеет сейчас:**
 
 | Блок | Описание |
 |------|----------|
-| Команда | Онлайн/жив, грид на карте |
-| Алерты | Карго, верт, chinook, смерть тиммейта (+ team chat), Smart Alarm |
-| Магазины | Поиск вендингов по названию / item id |
-| Устройства | Smart Switch ON/OFF, Alarm, Storage Monitor |
-| Камеры | CCTV / PTZ просмотр (WASD + мышь) |
-| Карта | Превью, окно крупно, миникарта с drag и точками команды |
-| Чат | Team chat |
+| Команда | Онлайн/жив, грид на карте, online/offline alerts без ложной волны на reconnect |
+| Spawn alerts | Team chat уведомления для `Patrol Heli`, `Chinook`, `Cargo`, `Traveling Vendor` с отдельными тумблерами |
+| Cargo Intel | Arrival / docking / departure alerts, route learning, countdown стоянки в порту |
+| Event Dock | Компактная панель активных событий, state badges, быстрый track на карту |
+| Магазины | Поиск вендингов по названию / item id, watchlist по товарам, restock alerts |
+| Trade Routes | Multi-hop profitable routes по товарам и валютам |
+| Устройства | Smart Switch ON/OFF, Alarm, Storage Monitor, явные alias для `!on` / `!off` / `!toggle` |
+| Камеры | CCTV / PTZ просмотр (WASD + мышь), live window, raw-frame rendering |
+| Карта | Превью, окно крупно, миникарта с drag, dead reckoning между poll-интервалами |
+| Чат | Team chat, `!leader`, `!upkeep`, `!mark`, `!share`, `!import` |
+| Прицел | Классический line-crosshair, PNG upload, presets, сохранение вариантов |
+
+**Rust+ P0 parity, которая уже готова:**
+
+- granular chat-first spawn alerts с антидублем;
+- настоящий `!leader` через Rust+ promote API;
+- watchlist конкретных `item_id` с focused restock alerts;
+- deep trade routes на 2-3 шага;
+- dead reckoning для карты и миникарты;
+- cargo intelligence desktop-уровня;
+- event dock с таймерами и быстрым tracking;
+- switch aliases с приоритетом над substring-поиском;
+- crosshair editor с PNG и presets;
+- team online/offline alerts с anti-spam логикой.
 
 **Данные:** `%APPDATA%\RustUtilityOverlay\rustplus\` — `data.json`, `rustplusjs-config.json`, `pairing.log`, `map_live.jpg`
 
