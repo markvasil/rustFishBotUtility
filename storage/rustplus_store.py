@@ -197,6 +197,28 @@ class DeviceHotkey:
 
 
 @dataclass
+class DeviceAlias:
+    id: str
+    server_id: str
+    alias: str
+    group_id: Optional[str] = None
+    device_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DeviceAlias:
+        return cls(
+            id=str(data["id"]),
+            server_id=str(data["server_id"]),
+            alias=str(data.get("alias", "")).strip().lower(),
+            group_id=str(data["group_id"]) if data.get("group_id") else None,
+            device_id=str(data["device_id"]) if data.get("device_id") else None,
+        )
+
+
+@dataclass
 class DeathMarker:
     server_id: str
     steam_id: int
@@ -621,6 +643,8 @@ class RustPlusStore:
         self._data["device_groups"] = [g.to_dict() for g in groups]
         hotkeys = [h for h in self.list_device_hotkeys() if h.group_id != group_id]
         self._data["device_hotkeys"] = [h.to_dict() for h in hotkeys]
+        aliases = [a for a in self.list_device_aliases() if a.group_id != group_id]
+        self._data["device_aliases"] = [a.to_dict() for a in aliases]
         self.save()
 
     def list_device_hotkeys(self) -> List[DeviceHotkey]:
@@ -720,6 +744,46 @@ class RustPlusStore:
     def remove_device_hotkey(self, hotkey_id: str) -> None:
         hotkeys = [h for h in self.list_device_hotkeys() if h.id != hotkey_id]
         self._data["device_hotkeys"] = [h.to_dict() for h in hotkeys]
+        self.save()
+
+    def list_device_aliases(self, server_id: Optional[str] = None) -> List[DeviceAlias]:
+        aliases = [DeviceAlias.from_dict(item) for item in self._data.get("device_aliases", [])]
+        if server_id:
+            return [a for a in aliases if a.server_id == server_id]
+        return aliases
+
+    def add_device_alias(
+        self,
+        server_id: str,
+        alias: str,
+        *,
+        group_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> DeviceAlias:
+        alias = alias.strip().lower()
+        if not alias:
+            raise ValueError("Пустой alias")
+        if bool(group_id) == bool(device_id):
+            raise ValueError("Alias должен указывать либо на Switch, либо на группу")
+        aliases = [
+            a for a in self.list_device_aliases()
+            if a.alias != alias and a.device_id != device_id and a.group_id != group_id
+        ]
+        entry = DeviceAlias(
+            id=str(uuid.uuid4()),
+            server_id=server_id,
+            alias=alias,
+            group_id=group_id,
+            device_id=device_id,
+        )
+        aliases.append(entry)
+        self._data["device_aliases"] = [a.to_dict() for a in aliases]
+        self.save()
+        return entry
+
+    def remove_device_alias(self, alias_id: str) -> None:
+        aliases = [a for a in self.list_device_aliases() if a.id != alias_id]
+        self._data["device_aliases"] = [a.to_dict() for a in aliases]
         self.save()
 
     def list_death_markers(self, server_id: Optional[str] = None) -> List[DeathMarker]:

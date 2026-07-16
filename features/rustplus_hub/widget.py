@@ -758,6 +758,22 @@ class RustPlusHubFeature(Feature):
         self._groups_list_frame.pack(fill="x", pady=(0, 4))
         self._hotkeys_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
         self._hotkeys_list_frame.pack(fill="x", pady=(4, 0))
+        field_label(devices_body, "Алиасы chat-команд")
+        alias_row = ctk.CTkFrame(devices_body, fg_color="transparent")
+        alias_row.pack(fill="x", pady=(8, 4))
+        self._alias_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            alias_row, textvariable=self._alias_var, width=140, height=28,
+            placeholder_text="alias, напр. bunker", corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            alias_row, "На выбранный Switch", self._assign_alias_to_selection, width=150, height=28,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            alias_row, "На группу", self._assign_alias_to_group_dialog, width=100, height=28,
+        ).pack(side="left")
+        self._aliases_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
+        self._aliases_list_frame.pack(fill="x", pady=(4, 0))
         self._switch_check_vars: Dict[str, ctk.BooleanVar] = {}
         self._refresh_switch_picker()
         self._refresh_groups_label()
@@ -1349,6 +1365,43 @@ class RustPlusHubFeature(Feature):
                     command=lambda hid=entry.id: self._delete_device_hotkey(hid),
                 ).pack(side="right", padx=6, pady=4)
 
+        if hasattr(self, "_aliases_list_frame") and self._aliases_list_frame is not None:
+            for child in self._aliases_list_frame.winfo_children():
+                child.destroy()
+            server = self._service.get_active_server()
+            aliases = self._service.store.list_device_aliases(server.id if server else None)
+            if not aliases:
+                ctk.CTkLabel(
+                    self._aliases_list_frame,
+                    text="Alias не заданы",
+                    font=ctk.CTkFont(size=10),
+                    text_color=Theme.DIM,
+                    anchor="w",
+                ).pack(fill="x")
+            else:
+                devices = {d.id: d for d in self._service.store.list_devices()}
+                groups = {g.id: g for g in self._service.store.list_device_groups()}
+                for entry in aliases:
+                    if entry.device_id and entry.device_id in devices:
+                        target = f"Switch «{devices[entry.device_id].name}»"
+                    elif entry.group_id and entry.group_id in groups:
+                        target = f"группа «{groups[entry.group_id].name}»"
+                    else:
+                        target = "не найдено"
+                    row = ctk.CTkFrame(self._aliases_list_frame, fg_color=Theme.CARD_ALT, corner_radius=6)
+                    row.pack(fill="x", pady=2)
+                    ctk.CTkLabel(
+                        row,
+                        text=f"@{entry.alias} → {target}",
+                        font=ctk.CTkFont(size=11),
+                        text_color=Theme.TEXT,
+                        anchor="w",
+                    ).pack(side="left", padx=8, pady=6, fill="x", expand=True)
+                    ctk.CTkButton(
+                        row, text="✕", width=28, height=24, fg_color="#3d4659",
+                        command=lambda aid=entry.id: self._delete_device_alias(aid),
+                    ).pack(side="right", padx=6, pady=4)
+
     def _delete_device_group(self, group_id: str) -> None:
         self._service.store.remove_device_group(group_id)
         self._service.reload_device_hotkeys()
@@ -1362,6 +1415,51 @@ class RustPlusHubFeature(Feature):
         self._set_status("Hotkey удалён")
         self._refresh_groups_label()
         self._refresh_devices_panel()
+
+    def _assign_alias_to_selection(self) -> None:
+        alias = self._alias_var.get().strip().lower() if hasattr(self, "_alias_var") else ""
+        if not alias:
+            self._set_status("Укажите alias", error=True)
+            return
+        selected = self._selected_switches()
+        if len(selected) != 1:
+            self._set_status("Для alias выберите ровно один Switch", error=True)
+            return
+        server = self._service.get_active_server()
+        if not server:
+            self._set_status("Нет активного сервера", error=True)
+            return
+        try:
+            self._service.store.add_device_alias(server.id, alias, device_id=selected[0].id)
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        self._set_status(f"Alias @{alias} → {selected[0].name}")
+        self._refresh_groups_label()
+
+    def _assign_alias_to_group_dialog(self) -> None:
+        alias = self._alias_var.get().strip().lower() if hasattr(self, "_alias_var") else ""
+        if not alias:
+            self._set_status("Укажите alias", error=True)
+            return
+        server = self._service.get_active_server()
+        groups = self._service.store.list_device_groups(server.id if server else None)
+        if not groups:
+            self._set_status("Нет групп для alias", error=True)
+            return
+        group = groups[0]
+        try:
+            self._service.store.add_device_alias(server.id, alias, group_id=group.id)
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        self._set_status(f"Alias @{alias} → группа {group.name}")
+        self._refresh_groups_label()
+
+    def _delete_device_alias(self, alias_id: str) -> None:
+        self._service.store.remove_device_alias(alias_id)
+        self._set_status("Alias удалён")
+        self._refresh_groups_label()
 
     def _refresh_fcm_warning(self) -> None:
         if hasattr(self, "_fcm_warn_label"):
