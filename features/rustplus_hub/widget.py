@@ -22,6 +22,7 @@ from features.rustplus_hub.ui_theme import (
     step_card,
     field_label,
 )
+from features.rustplus_hub.camera_window import CameraWindow
 from features.rustplus_hub.map_window import MapWindow
 from features.rustplus_hub.minimap_window import MinimapWindow
 from overlay.key_capture import KeyCapture
@@ -2014,17 +2015,37 @@ class RustPlusHubFeature(Feature):
         self._refresh_cameras_panel()
 
     def _open_camera_view(self, camera_id: str) -> None:
-        if not self._service.connection.is_connected:
-            self._set_status("Сначала подключитесь к серверу", error=True)
+        cam_id = camera_id.strip().upper()
+        if not cam_id:
+            self._set_status("Введите ID камеры", error=True)
+            self._overlay.show_live_alert("Камера: введите ID")
             return
-        if self._camera_window and self._camera_window.is_open:
-            self._camera_window.close()
-            self._camera_window = None
-        self._service.open_camera(camera_id)
+        if not self._service.connection.is_connected:
+            msg = "Сначала подключитесь к серверу"
+            self._set_status(msg, error=True)
+            self._overlay.show_live_alert(msg)
+            print(f"[Rust+] camera open blocked: not connected ({cam_id})")
+            return
 
-    def _close_camera_window(self) -> None:
+        print(f"[Rust+] opening camera UI for {cam_id}")
         if self._camera_window and self._camera_window.is_open:
-            self._camera_window.close()
+            # Не зовём close_camera здесь — open_camera сам закроет предыдущую подписку
+            self._camera_window.close(notify_service=False)
+            self._camera_window = None
+
+        self._camera_window = CameraWindow(
+            self._root,
+            self._service,
+            cam_id,
+            status_text=f"Подключение к {cam_id}...",
+        )
+        self._set_status(f"Открытие камеры {cam_id}...")
+        self._overlay.show_live_alert(f"Камера: подключение {cam_id}")
+        self._service.open_camera(cam_id)
+
+    def _close_camera_window(self, *, notify_service: bool = True) -> None:
+        if self._camera_window and self._camera_window.is_open:
+            self._camera_window.close(notify_service=notify_service)
         self._camera_window = None
 
     def _refresh_cameras_panel(self) -> None:
@@ -2378,150 +2399,173 @@ class RustPlusHubFeature(Feature):
 
     def _on_event(self, event: RustPlusEvent) -> None:
         def apply():
-            if event.type == EventType.STATUS:
-                self._set_status(str(event.payload.get("message", "")))
-                self._refresh_status()
-            elif event.type == EventType.ERROR:
-                self._set_status(str(event.payload.get("message", "Ошибка")), error=True)
-            elif event.type == EventType.SERVER_PAIRED:
-                self._refresh_servers()
-            elif event.type == EventType.CONNECTED:
-                self._refresh_servers()
-                self._refresh_status()
-                self._service.store.sync_devices_from_pairing_log(
-                    str(event.payload.get("server_id") or "") or None
-                )
-                self._refresh_devices_panel()
-                self._service.refresh_device_states()
-                if self._info_label:
-                    self._info_label.configure(text=f"Подключено: {event.payload.get('name', '')}")
-                self._set_status(f"Подключено к {event.payload.get('name', '')}")
-            elif event.type == EventType.DISCONNECTED:
-                self._refresh_status()
-                self._vendors_cache = []
-                self._vendor_page = 0
-                self._vendor_view_mode = "catalog"
-                self._vendor_selected_item_id = None
-                self._vendor_catalog_cache = []
-                self._vendor_filtered_catalog = []
-                self._vendor_offers_cache = []
-                self._vendors_signature = None
-                self._map_overlay_signature = None
-                self._device_states = {}
-                self._server_time = ""
-                self._map_path = None
-                self._map_size = None
-                self._team_cache = []
-                self._minimap.hide()
-                self._close_camera_window()
-                self._alerts_log = []
-                self._refresh_alerts_panel()
-                self._refresh_team_panel([])
-                self._refresh_events_panel([])
-                if self._vendor_back_btn:
-                    self._vendor_back_btn.pack_forget()
-                if self._vendor_selected_label:
-                    self._vendor_selected_label.configure(text="")
-                self._refresh_vendors_panel()
-                self._refresh_devices_panel()
-                if self._info_label:
-                    self._info_label.configure(text="Не подключено")
-            elif event.type == EventType.SERVER_INFO:
-                map_size = event.payload.get("map_size")
-                if map_size:
-                    self._map_size = int(map_size)
-                    self._minimap.set_team(self._map_overlay_team(), self._map_size)
-                if self._info_label:
-                    players = event.payload.get("players")
-                    max_p = event.payload.get("max_players")
-                    name = event.payload.get("name", "")
-                    map_name = event.payload.get("map_name")
-                    warning = event.payload.get("warning")
-                    if players is not None and max_p is not None:
-                        players_text = f"Игроков: {players}/{max_p}"
-                    else:
-                        players_text = "Игроки: данные недоступны"
-                    text = f"{name}\n{players_text}"
-                    if map_name:
-                        text += f"\nКарта: {map_name}"
-                    if self._server_time:
-                        text += f"\nВремя: {self._server_time}"
-                    if warning:
-                        text += f"\n{warning}"
-                    self._info_label.configure(text=text)
-            elif event.type == EventType.SERVER_TIME:
-                self._server_time_raw = event.payload.get("raw_time")
-                self._server_time = str(event.payload.get("time", ""))
-                if self._info_label and self._service.connection.is_connected:
-                    current = self._info_label.cget("text")
-                    lines = [line for line in current.split("\n") if not line.startswith("Время:")]
-                    lines.append(f"Время: {self._server_time}")
-                    self._info_label.configure(text="\n".join(lines))
-            elif event.type == EventType.TEAM_INFO:
-                self._team_cache = event.payload.get("members", [])
-                self._refresh_team_panel(self._team_cache)
+            try:
+                self._apply_event(event)
+            except Exception as exc:
+                print(f"[Rust+] ошибка UI-обработчика {event.type}: {exc}")
+                self._set_status(f"Ошибка UI ({event.type}): {exc}", error=True)
+
+        self._root.after(0, apply)
+
+    def _apply_event(self, event: RustPlusEvent) -> None:
+        if event.type == EventType.STATUS:
+            self._set_status(str(event.payload.get("message", "")))
+            self._refresh_status()
+        elif event.type == EventType.ERROR:
+            msg = str(event.payload.get("message", "Ошибка"))
+            self._set_status(msg, error=True)
+            if "Камера" in msg:
+                self._overlay.show_live_alert(msg)
+                if self._camera_window and self._camera_window.is_open:
+                    self._camera_window.set_status(msg, error=True)
+                    print(f"[Rust+] camera error shown in window: {msg}")
+        elif event.type == EventType.SERVER_PAIRED:
+            self._refresh_servers()
+        elif event.type == EventType.CONNECTED:
+            self._refresh_servers()
+            self._refresh_status()
+            self._service.store.sync_devices_from_pairing_log(
+                str(event.payload.get("server_id") or "") or None
+            )
+            self._refresh_devices_panel()
+            self._service.refresh_device_states()
+            if self._info_label:
+                self._info_label.configure(text=f"Подключено: {event.payload.get('name', '')}")
+            self._set_status(f"Подключено к {event.payload.get('name', '')}")
+        elif event.type == EventType.DISCONNECTED:
+            self._refresh_status()
+            self._vendors_cache = []
+            self._vendor_page = 0
+            self._vendor_view_mode = "catalog"
+            self._vendor_selected_item_id = None
+            self._vendor_catalog_cache = []
+            self._vendor_filtered_catalog = []
+            self._vendor_offers_cache = []
+            self._vendors_signature = None
+            self._map_overlay_signature = None
+            self._device_states = {}
+            self._server_time = ""
+            self._map_path = None
+            self._map_size = None
+            self._team_cache = []
+            self._minimap.hide()
+            self._close_camera_window()
+            self._alerts_log = []
+            self._refresh_alerts_panel()
+            self._refresh_team_panel([])
+            self._refresh_events_panel([])
+            if self._vendor_back_btn:
+                self._vendor_back_btn.pack_forget()
+            if self._vendor_selected_label:
+                self._vendor_selected_label.configure(text="")
+            self._refresh_vendors_panel()
+            self._refresh_devices_panel()
+            if self._info_label:
+                self._info_label.configure(text="Не подключено")
+        elif event.type == EventType.SERVER_INFO:
+            map_size = event.payload.get("map_size")
+            if map_size:
+                self._map_size = int(map_size)
+                self._minimap.set_team(self._map_overlay_team(), self._map_size)
+            if self._info_label:
+                players = event.payload.get("players")
+                max_p = event.payload.get("max_players")
+                name = event.payload.get("name", "")
+                map_name = event.payload.get("map_name")
+                warning = event.payload.get("warning")
+                if players is not None and max_p is not None:
+                    players_text = f"Игроков: {players}/{max_p}"
+                else:
+                    players_text = "Игроки: данные недоступны"
+                text = f"{name}\n{players_text}"
+                if map_name:
+                    text += f"\nКарта: {map_name}"
+                if self._server_time:
+                    text += f"\nВремя: {self._server_time}"
+                if warning:
+                    text += f"\n{warning}"
+                self._info_label.configure(text=text)
+        elif event.type == EventType.SERVER_TIME:
+            self._server_time_raw = event.payload.get("raw_time")
+            self._server_time = str(event.payload.get("time", ""))
+            if self._info_label and self._service.connection.is_connected:
+                current = self._info_label.cget("text")
+                lines = [line for line in current.split("\n") if not line.startswith("Время:")]
+                lines.append(f"Время: {self._server_time}")
+                self._info_label.configure(text="\n".join(lines))
+        elif event.type == EventType.TEAM_INFO:
+            self._team_cache = event.payload.get("members", [])
+            self._refresh_team_panel(self._team_cache)
+            self._schedule_map_overlay_sync()
+        elif event.type == EventType.MARKERS:
+            self._vendors_cache = event.payload.get("vendors", [])
+            self._events_cache = event.payload.get("events", [])
+            self._refresh_events_panel(self._events_cache)
+            self._schedule_vendor_refresh()
+            self._schedule_map_overlay_sync()
+        elif event.type == EventType.ENTITY_CHANGED:
+            entity_id = int(event.payload.get("entity_id", 0))
+            self._device_states[entity_id] = {
+                "value": event.payload.get("value"),
+                "capacity": event.payload.get("capacity"),
+                "items": event.payload.get("items"),
+                "has_protection": event.payload.get("has_protection"),
+                "protection_expiry": event.payload.get("protection_expiry"),
+            }
+            self._refresh_devices_panel()
+        elif event.type == EventType.MAP_IMAGE:
+            path = event.payload.get("path")
+            if path:
+                self._show_map_preview(str(path))
                 self._schedule_map_overlay_sync()
-            elif event.type == EventType.MARKERS:
-                self._vendors_cache = event.payload.get("vendors", [])
-                self._events_cache = event.payload.get("events", [])
-                self._refresh_events_panel(self._events_cache)
-                self._schedule_vendor_refresh()
-                self._schedule_map_overlay_sync()
-            elif event.type == EventType.ENTITY_CHANGED:
-                entity_id = int(event.payload.get("entity_id", 0))
-                self._device_states[entity_id] = {
-                    "value": event.payload.get("value"),
-                    "capacity": event.payload.get("capacity"),
-                    "items": event.payload.get("items"),
-                    "has_protection": event.payload.get("has_protection"),
-                    "protection_expiry": event.payload.get("protection_expiry"),
+        elif event.type == EventType.LIVE_ALERT:
+            self._append_alert(
+                str(event.payload.get("message", "Событие на сервере")),
+                category=str(event.payload.get("category", "")),
+            )
+        elif event.type == EventType.DEVICE_PAIRED:
+            self._refresh_devices_panel()
+            self._refresh_groups_label()
+            self._set_status(
+                f"Устройство добавлено: {event.payload.get('name', 'Device')} "
+                f"(#{event.payload.get('entity_id', '?')})"
+            )
+        elif event.type == EventType.CHAT_MESSAGE:
+            self._append_chat(
+                event.payload.get("name", "?"),
+                event.payload.get("message", ""),
+            )
+        elif event.type == EventType.CAMERA_STATUS:
+            cam_id = str(event.payload.get("camera_id", ""))
+            if event.payload.get("open"):
+                controls = {
+                    "movement": bool(event.payload.get("movement")),
+                    "mouse": bool(event.payload.get("mouse")),
                 }
-                self._refresh_devices_panel()
-            elif event.type == EventType.MAP_IMAGE:
-                path = event.payload.get("path")
-                if path:
-                    self._show_map_preview(str(path))
-                    self._schedule_map_overlay_sync()
-            elif event.type == EventType.LIVE_ALERT:
-                self._append_alert(
-                    str(event.payload.get("message", "Событие на сервере")),
-                    category=str(event.payload.get("category", "")),
-                )
-            elif event.type == EventType.DEVICE_PAIRED:
-                self._refresh_devices_panel()
-                self._refresh_groups_label()
-                self._set_status(
-                    f"Устройство добавлено: {event.payload.get('name', 'Device')} "
-                    f"(#{event.payload.get('entity_id', '?')})"
-                )
-            elif event.type == EventType.CHAT_MESSAGE:
-                self._append_chat(
-                    event.payload.get("name", "?"),
-                    event.payload.get("message", ""),
-                )
-            elif event.type == EventType.CAMERA_STATUS:
-                if event.payload.get("open"):
-                    cam_id = str(event.payload.get("camera_id", ""))
-                    if self._camera_window and self._camera_window.is_open:
-                        self._camera_window.close()
+                if self._camera_window and self._camera_window.is_open:
+                    self._camera_window.set_controls(controls)
+                    self._camera_window.set_status(f"Камера {cam_id}: ожидание кадра...")
+                else:
                     self._camera_window = CameraWindow(
                         self._root,
                         self._service,
                         cam_id,
-                        controls={
-                            "movement": bool(event.payload.get("movement")),
-                            "mouse": bool(event.payload.get("mouse")),
-                        },
+                        controls=controls,
+                        status_text=f"Камера {cam_id}: ожидание кадра...",
                     )
-                else:
-                    self._close_camera_window()
-            elif event.type == EventType.CAMERA_FRAME:
-                path = event.payload.get("path")
-                if path and self._camera_window and self._camera_window.is_open:
-                    self._camera_window.update_frame(str(path))
-            self.request_resize()
+                self._set_status(f"Камера открыта: {cam_id}")
+                self._overlay.show_live_alert(f"Камера открыта: {cam_id}")
+                print(f"[Rust+] camera subscribed: {cam_id} controls={controls}")
+            else:
+                # Промежуточный close перед новым open — UI не трогаем,
+                # иначе только что созданное окно мгновенно уничтожается.
+                print(f"[Rust+] camera closed event (UI kept): {cam_id}")
+        elif event.type == EventType.CAMERA_FRAME:
+            path = event.payload.get("path")
+            if path and self._camera_window and self._camera_window.is_open:
+                self._camera_window.update_frame(str(path))
+        self.request_resize()
 
-        self._root.after(0, apply)
 
     def _append_chat(self, name: str, message: str) -> None:
         if not self._chat_frame:

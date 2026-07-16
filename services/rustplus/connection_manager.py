@@ -132,7 +132,15 @@ class ConnectionManager:
         if not self._loop or not self.is_connected:
             self._bus.emit(EventType.ERROR, message="Камера: сначала подключитесь к серверу")
             return
-        asyncio.run_coroutine_threadsafe(self._open_camera(camera_id), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._open_camera(camera_id), self._loop)
+
+        def _report(done) -> None:
+            try:
+                done.result()
+            except Exception as exc:
+                self._bus.emit(EventType.ERROR, message=f"Камера: {exc}")
+
+        future.add_done_callback(_report)
 
     def close_camera(self) -> None:
         if not self._loop:
@@ -386,9 +394,11 @@ class ConnectionManager:
     def _register_chat_team(self, socket: RustSocket, details: ServerDetails) -> None:
         @ChatEvent(details)
         async def on_chat(event):
-            name = getattr(event, "name", "Unknown")
-            message = getattr(event, "message", "")
-            steam_id = getattr(event, "steam_id", None)
+            payload = getattr(event, "message", event)
+            name = str(getattr(payload, "name", "Unknown") or "Unknown")
+            raw_message = getattr(payload, "message", "")
+            message = str(raw_message or "")
+            steam_id = getattr(payload, "steam_id", None)
             self._bus.emit(
                 EventType.CHAT_MESSAGE,
                 name=name,
@@ -766,32 +776,66 @@ class ConnectionManager:
         return "cargo"
 
     async def _open_camera(self, camera_id: str) -> None:
-        if not self._socket:
-            self._bus.emit(EventType.ERROR, message="Камера: нет подключения")
-            return
-
-        await self._close_camera()
         cam_id = camera_id.strip().upper()
-        self._bus.emit(EventType.STATUS, message=f"Подключение к камере {cam_id}...")
+        try:
+            if not self._socket:
+                self._bus.emit(EventType.ERROR, message="Камера: нет подключения")
+                return
 
-        manager = await self._socket.get_camera_manager(cam_id)
-        if isinstance(manager, RustError):
-            self._bus.emit(EventType.ERROR, message=f"Камера: {manager.reason}")
-            return
+            print(f"[Rust+] _open_camera start {cam_id}")
+            await self._close_camera()
+            self._bus.emit(EventType.STATUS, message=f"Подключение к камере {cam_id}...")
 
-        self._camera_manager = manager
-        self._camera_id = cam_id
-        self._camera_controls = {
-            "movement": manager.can_move(CameraMovementOptions.MOVEMENT),
-            "mouse": manager.can_move(CameraMovementOptions.MOUSE),
-        }
-        self._bus.emit(
-            EventType.CAMERA_STATUS,
-            open=True,
-            camera_id=cam_id,
-            **self._camera_controls,
-        )
-        self._camera_frame_task = asyncio.create_task(self._camera_frame_loop())
+            try:
+                manager = await asyncio.wait_for(
+                    self._socket.get_camera_manager(cam_id),
+                    timeout=12.0,
+                )
+            except asyncio.TimeoutError:
+                self._bus.emit(
+                    EventType.ERROR,
+                    message=f"Камера: таймаут подписки на {cam_id}. Закройте мобильный Rust+ и проверьте ID.",
+                )
+                print(f"[Rust+] camera timeout {cam_id}")
+                return
+
+            if isinstance(manager, RustError):
+                reason = str(manager.reason or "")
+                friendly = {
+                    "player_online": (
+                        "Камера недоступна: вы онлайн на сервере. "
+                        "Выйдите из игры (в меню / sleeper) и откройте снова."
+                    ),
+                    "not_found": f"Камера не найдена: {cam_id}. Проверьте ID на дроне/CCTV.",
+                    "access_denied": "Камера: нет доступа (не ваша сеть / чужой TC).",
+                    "no_player": "Камера: персонаж не на сервере (нужен sleeper/offline).",
+                }.get(reason.lower(), f"Камера: {reason}")
+                self._bus.emit(EventType.ERROR, message=friendly)
+                print(f"[Rust+] camera RustError {cam_id}: {reason}")
+                return
+
+            self._camera_manager = manager
+            self._camera_id = cam_id
+            self._camera_controls = {
+                "movement": manager.can_move(CameraMovementOptions.MOVEMENT),
+                "mouse": manager.can_move(CameraMovementOptions.MOUSE),
+            }
+            self._bus.emit(
+                EventType.CAMERA_STATUS,
+                open=True,
+                camera_id=cam_id,
+                **self._camera_controls,
+            )
+            self._bus.emit(EventType.STATUS, message=f"Камера открыта: {cam_id}")
+            print(f"[Rust+] camera manager ready {cam_id} controls={self._camera_controls}")
+            self._camera_frame_task = asyncio.create_task(self._camera_frame_loop())
+        except Exception as exc:
+            self._camera_manager = None
+            self._camera_id = None
+            self._camera_controls = {}
+            self._bus.emit(EventType.ERROR, message=f"Камера: {exc}")
+            print(f"[Rust+] camera exception {cam_id}: {exc}")
+            raise
 
     async def _close_camera(self) -> None:
         if self._camera_frame_task:
@@ -815,11 +859,16 @@ class ConnectionManager:
             self._bus.emit(EventType.CAMERA_STATUS, open=False, camera_id=closed_id)
 
     async def _camera_frame_loop(self) -> None:
+        import time
+
         from app_paths import get_rustplus_dir
 
         path = get_rustplus_dir() / "camera_live.jpg"
         try:
             while self._camera_manager and self._camera_manager._open:
+                # Подписка Rust+ живёт ~15 с — нужно продлевать
+                if time.time() - self._camera_manager.time_since_last_subscribe > 10:
+                    await self._camera_manager.resubscribe()
                 if self._camera_manager.has_frame_data():
                     frame = await self._camera_manager.get_frame(render_entities=True)
                     if frame is not None:

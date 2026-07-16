@@ -32,6 +32,8 @@ class CameraWindow:
         service: "RustPlusService",
         camera_id: str,
         controls: Optional[Dict[str, bool]] = None,
+        *,
+        status_text: str = "Подключение к камере...",
     ) -> None:
         self._root = root
         self._service = service
@@ -45,24 +47,22 @@ class CameraWindow:
         self._win = ctk.CTkToplevel(root)
         self._win.title(f"Rust+ — {camera_id}")
         self._win.configure(fg_color="#0d1117")
-        self._win.attributes("-topmost", True)
+        try:
+            self._win.attributes("-topmost", True)
+        except Exception:
+            pass
 
         bar = ctk.CTkFrame(self._win, fg_color="#141a28", height=36, corner_radius=0)
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
-        hints = []
-        if self._controls.get("movement"):
-            hints.append("WASD/стрелки")
-        if self._controls.get("mouse"):
-            hints.append("мышь")
-        hint_text = " | ".join(hints) if hints else "Статичная камера"
-        ctk.CTkLabel(
+        self._title_label = ctk.CTkLabel(
             bar,
-            text=f"{camera_id} — {hint_text} | Esc — закрыть",
+            text=self._title_text(),
             font=ctk.CTkFont(size=12),
             text_color="#8b93a7",
-        ).pack(side="left", padx=12)
+        )
+        self._title_label.pack(side="left", padx=12)
         ctk.CTkButton(
             bar, text="✕", width=32, height=28, fg_color="#4a2230",
             command=self.close,
@@ -70,16 +70,18 @@ class CameraWindow:
 
         self._label = ctk.CTkLabel(
             self._win,
-            text="Ожидание кадра...",
+            text=status_text,
             text_color="#6b7280",
             font=ctk.CTkFont(size=12),
+            width=self.DISPLAY_MAX[0],
+            height=self.DISPLAY_MAX[1],
         )
         self._label.pack(padx=8, pady=8)
 
         win_w = self.DISPLAY_MAX[0] + 16
         win_h = self.DISPLAY_MAX[1] + 56
-        x = (root.winfo_screenwidth() - win_w) // 2
-        y = (root.winfo_screenheight() - win_h) // 2
+        x = max(40, (root.winfo_screenwidth() - win_w) // 2)
+        y = max(40, (root.winfo_screenheight() - win_h) // 2)
         self._win.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         self._win.protocol("WM_DELETE_WINDOW", self.close)
@@ -89,7 +91,42 @@ class CameraWindow:
         self._label.bind("<ButtonPress-1>", self._on_mouse_press)
         self._label.bind("<B1-Motion>", self._on_mouse_drag)
         self._label.bind("<ButtonRelease-1>", self._on_mouse_release)
-        self._win.focus_force()
+
+        self._bring_to_front()
+        self._win.after(80, self._bring_to_front)
+        self._win.after(250, self._bring_to_front)
+
+    def _title_text(self) -> str:
+        hints = []
+        if self._controls.get("movement"):
+            hints.append("WASD/стрелки")
+        if self._controls.get("mouse"):
+            hints.append("мышь")
+        hint_text = " | ".join(hints) if hints else "ожидание / статичная"
+        return f"{self._camera_id} — {hint_text} | Esc — закрыть"
+
+    def _bring_to_front(self) -> None:
+        if self._closed or not self._win.winfo_exists():
+            return
+        try:
+            self._win.deiconify()
+            self._win.lift()
+            self._win.attributes("-topmost", True)
+            self._win.focus_force()
+        except Exception:
+            pass
+
+    def set_controls(self, controls: Dict[str, bool]) -> None:
+        self._controls = dict(controls or {})
+        if self.is_open:
+            self._title_label.configure(text=self._title_text())
+
+    def set_status(self, text: str, *, error: bool = False) -> None:
+        if not self.is_open:
+            return
+        color = "#f87171" if error else "#6b7280"
+        self._label.configure(image=None, text=text, text_color=color)
+        self._image_ref = None
 
     @property
     def is_open(self) -> bool:
@@ -110,13 +147,20 @@ class CameraWindow:
         except Exception as exc:
             self._label.configure(image=None, text=str(exc), text_color="#f87171")
 
-    def close(self) -> None:
+    def close(self, *, notify_service: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
         self._active_keys.clear()
-        self._service.camera_clear_movement()
-        self._service.close_camera()
+        if notify_service:
+            try:
+                self._service.camera_clear_movement()
+            except Exception:
+                pass
+            try:
+                self._service.close_camera()
+            except Exception:
+                pass
         if self._win.winfo_exists():
             self._win.destroy()
 

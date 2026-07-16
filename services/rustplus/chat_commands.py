@@ -34,7 +34,7 @@ class ChatCommandHandler:
         if not self._store.get_settings().chat_commands_enabled:
             return False
 
-        text = message.strip()
+        text = str(message or "").strip()
         if not text.startswith("!"):
             if text.startswith("@@DRAW:"):
                 self._import_shared_drawing(text[7:])
