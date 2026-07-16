@@ -400,6 +400,9 @@ class RustPlusHubFeature(Feature):
         self.request_resize()
 
     def on_show(self) -> None:
+        # Event pump должен жить всегда: без него CONNECTED/ERROR не доходят до UI
+        # и Connect залипает после ухода на другие вкладки.
+        self._start_event_pump()
         self._refresh_status()
         self._refresh_servers()
         self._refresh_devices_panel()
@@ -2635,14 +2638,19 @@ class RustPlusHubFeature(Feature):
         self.request_resize()
 
     def on_hide(self) -> None:
-        if self._poll_job:
-            self._root.after_cancel(self._poll_job)
-            self._poll_job = None
+        # Event pump НЕ останавливаем: pairing/connect/алерты должны работать
+        # в фоне, пока открыта любая вкладка оверлея.
         if self._event_dock_job:
             self._root.after_cancel(self._event_dock_job)
             self._event_dock_job = None
 
     def on_shutdown(self) -> None:
+        if self._poll_job:
+            try:
+                self._root.after_cancel(self._poll_job)
+            except Exception:
+                pass
+            self._poll_job = None
         self.on_hide()
         if self._root and self._vendors_render_job:
             try:
@@ -2899,12 +2907,25 @@ class RustPlusHubFeature(Feature):
     def _connect(self, server: PairedServer) -> None:
         if self._connecting_server_id:
             return
+        self._start_event_pump()
         self._connecting_server_id = server.id
         btn = self._connect_buttons.get(server.id)
         if btn:
             btn.begin("…")
         self._service.connect_server(server)
         self._set_status(f"Подключение к {server.name}...")
+        # Страховка: если ответ шины потеряется, не блокируем Connect навсегда.
+        self._root.after(60_000, lambda sid=server.id: self._connect_timeout_guard(sid))
+
+    def _connect_timeout_guard(self, server_id: str) -> None:
+        if self._connecting_server_id != server_id:
+            return
+        if self._service.connection.is_connected:
+            self._end_connect()
+            return
+        self._end_connect()
+        self._refresh_servers()
+        self._set_status("Таймаут подключения. Попробуйте ещё раз.", error=True)
 
     def _remove_server(self, server_id: str) -> None:
         name = self._service.store.get_server(server_id)
@@ -2942,9 +2963,13 @@ class RustPlusHubFeature(Feature):
         self._refresh_status()
 
     def _start_event_pump(self) -> None:
+        if self._poll_job is not None:
+            return
+
         def pump():
             self._service.event_bus.dispatch_all_pending()
             self._poll_job = self._root.after(200, pump)
+
         self._poll_job = self._root.after(200, pump)
 
     def _on_event(self, event: RustPlusEvent) -> None:
