@@ -46,10 +46,13 @@ def run_smoke() -> None:
 
     notes = overlay.get_feature("notes")
     assert notes is not None
-    notes._title_var.set("Test Base")
-    notes._code_var.set("1234")
-    notes._add_entry()
+    assert notes._text is not None
+    notes._text.delete("1.0", "end")
+    notes._text.insert("1.0", "Test note line\nкод 1234")
+    notes._save()
     overlay.root.update_idletasks()
+    assert "Test note line" in notes._content
+    assert session.get_feature("notes").get("text", "").startswith("Test note line")
 
     timers = overlay.get_feature("timers")
     assert timers is not None

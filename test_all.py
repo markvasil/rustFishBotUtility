@@ -246,9 +246,9 @@ def test_session():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "session.json"
         store = SessionStore(path)
-        store.set_feature("notes", {"entries": [{"title": "Base", "code": "1234", "note": ""}]})
+        store.set_feature("notes", {"text": "база A\nкод 1234"})
         store2 = SessionStore(path)
-        assert store2.get_feature("notes")["entries"][0]["code"] == "1234"
+        assert store2.get_feature("notes")["text"] == "база A\nкод 1234"
 
 
 def test_furnace_from_refined():
