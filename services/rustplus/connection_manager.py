@@ -14,7 +14,13 @@ from services.rustplus.cargo_tracker import CargoTracker
 from services.rustplus.chat_commands import ChatCommandHandler
 from services.rustplus.event_bus import EventBus, EventType
 from services.rustplus.event_tracker import LiveEventTracker, TeamTracker, spawn_category_for_type
-from services.rustplus.live_format import format_markers, format_team, resolve_item_name, upkeep_hours_left
+from services.rustplus.live_format import (
+    add_motion_vectors,
+    format_markers,
+    format_team,
+    resolve_item_name,
+    upkeep_hours_left,
+)
 from services.rustplus.player_intel import PlayerIntelDB
 from services.rustplus.shop_tracker import ShopTracker
 from storage.rustplus_store import PairedServer, RustPlusStore
@@ -654,6 +660,11 @@ class ConnectionManager:
                 else:
                     self._poll_failures = 0
                     payload = format_team(team, self._map_size)
+                    payload["members"] = add_motion_vectors(
+                        payload.get("members", []),
+                        self._team_cache.get("members", []),
+                        key_name="steam_id",
+                    )
                     self._team_cache = payload
                     self._bus.emit(EventType.TEAM_INFO, **payload)
                     if self._connected_server:
@@ -667,6 +678,16 @@ class ConnectionManager:
                 else:
                     self._poll_failures = 0
                     payload = format_markers(markers, self._map_size)
+                    payload["events"] = add_motion_vectors(
+                        payload.get("events", []),
+                        self._markers_cache.get("events", []),
+                        key_name="id",
+                    )
+                    payload["vendors"] = add_motion_vectors(
+                        payload.get("vendors", []),
+                        self._markers_cache.get("vendors", []),
+                        key_name="id",
+                    )
                     self._markers_cache = payload
                     self._bus.emit(EventType.MARKERS, **payload)
                     for event in self._event_tracker.detect_new(payload.get("events", [])):

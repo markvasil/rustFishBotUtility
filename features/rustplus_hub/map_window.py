@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
+from services.rustplus.live_format import project_motion
 from services.rustplus.map_renderer import MapRenderer
 
 
@@ -157,9 +158,12 @@ class MapWindow:
             return
         cw = max(self._canvas.winfo_width(), 400)
         ch = max(self._canvas.winfo_height(), 300)
+        projected_team = project_motion(self._team, map_size=self._map_size)
+        projected_events = project_motion(self._events, map_size=self._map_size)
+        projected_vendors = project_motion(self._vendors, map_size=self._map_size)
         center = (self._pan_x, self._pan_y)
         if self._follow_steam_id and self._map_size:
-            for member in self._team:
+            for member in projected_team:
                 if int(member.get("steam_id", 0)) == int(self._follow_steam_id):
                     from services.rustplus.live_format import world_to_map_pixel
 
@@ -173,11 +177,11 @@ class MapWindow:
         image = self._renderer.render(
             self._path,
             map_size=self._map_size,
-            team_members=self._team,
+            team_members=projected_team,
             death_markers=self._deaths,
             drawings=self._drawings,
-            events=self._events,
-            vendors=self._vendors,
+            events=projected_events,
+            vendors=projected_vendors,
             tracked_event_id=self._tracked_event_id,
             follow_steam_id=None,
             view_center=center,

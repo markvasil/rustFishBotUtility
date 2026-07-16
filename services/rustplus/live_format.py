@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from rustplus.structs.rust_marker import RustMarker
@@ -40,6 +41,75 @@ def world_to_grid(x: float, y: float, map_size: int) -> str:
         return f"{col}{row}"
     except Exception:
         return "?"
+
+
+def add_motion_vectors(
+    current_items: List[Dict[str, Any]],
+    previous_items: List[Dict[str, Any]],
+    *,
+    key_name: str,
+    sample_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    sample_ts = float(sample_ts or time.time())
+    prev_by_key: Dict[Any, Dict[str, Any]] = {}
+    for item in previous_items:
+        key = item.get(key_name)
+        if key is not None:
+            prev_by_key[key] = item
+
+    enriched: List[Dict[str, Any]] = []
+    for item in current_items:
+        row = dict(item)
+        key = row.get(key_name)
+        prev = prev_by_key.get(key)
+        vx = 0.0
+        vy = 0.0
+        if prev is not None and prev.get("x") is not None and prev.get("y") is not None:
+            prev_ts = float(prev.get("_sample_ts") or sample_ts)
+            dt = max(0.001, sample_ts - prev_ts)
+            try:
+                vx = (float(row.get("x") or 0.0) - float(prev.get("x") or 0.0)) / dt
+                vy = (float(row.get("y") or 0.0) - float(prev.get("y") or 0.0)) / dt
+            except (TypeError, ValueError):
+                vx = 0.0
+                vy = 0.0
+        row["_sample_ts"] = sample_ts
+        row["_vx"] = vx
+        row["_vy"] = vy
+        enriched.append(row)
+    return enriched
+
+
+def project_motion(
+    items: List[Dict[str, Any]],
+    *,
+    now_ts: Optional[float] = None,
+    horizon_sec: float = 2.5,
+    map_size: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    now_ts = float(now_ts or time.time())
+    projected: List[Dict[str, Any]] = []
+    for item in items:
+        row = dict(item)
+        x = row.get("x")
+        y = row.get("y")
+        if x is None or y is None:
+            projected.append(row)
+            continue
+        age = max(0.0, min(horizon_sec, now_ts - float(row.get("_sample_ts") or now_ts)))
+        try:
+            px = float(x) + float(row.get("_vx") or 0.0) * age
+            py = float(y) + float(row.get("_vy") or 0.0) * age
+            if map_size:
+                px = max(0.0, min(float(map_size), px))
+                py = max(0.0, min(float(map_size), py))
+            row["x"] = px
+            row["y"] = py
+            row["grid"] = world_to_grid(px, py, int(map_size or 0))
+        except (TypeError, ValueError):
+            pass
+        projected.append(row)
+    return projected
 
 
 def world_to_map_pixel(

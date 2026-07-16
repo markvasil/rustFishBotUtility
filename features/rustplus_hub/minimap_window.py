@@ -7,6 +7,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from services.rustplus.map_renderer import MapRenderer
+from services.rustplus.live_format import project_motion
 
 
 class MinimapWindow:
@@ -211,11 +212,11 @@ class MinimapWindow:
         return self._renderer.render(
             path,
             map_size=self._map_size,
-            team_members=self._team_members,
+            team_members=project_motion(self._team_members, map_size=self._map_size),
             death_markers=self._death_markers,
             drawings=self._drawings,
-            events=self._events,
-            vendors=self._vendors,
+            events=project_motion(self._events, map_size=self._map_size),
+            vendors=project_motion(self._vendors, map_size=self._map_size),
             tracked_event_id=self._tracked_event_id,
             follow_steam_id=self._follow_steam_id,
             zoom=1.4 if self._follow_steam_id else 1.0,
