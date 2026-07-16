@@ -65,6 +65,9 @@ class AlertSettings:
     spawn_chinook: bool = True
     spawn_cargo: bool = True
     spawn_vendor: bool = True
+    cargo_arrival: bool = True
+    cargo_docking: bool = True
+    cargo_departure: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -80,6 +83,9 @@ class AlertSettings:
             spawn_chinook=bool(data.get("spawn_chinook", True)),
             spawn_cargo=bool(data.get("spawn_cargo", True)),
             spawn_vendor=bool(data.get("spawn_vendor", True)),
+            cargo_arrival=bool(data.get("cargo_arrival", True)),
+            cargo_docking=bool(data.get("cargo_docking", True)),
+            cargo_departure=bool(data.get("cargo_departure", True)),
         )
 
 
@@ -580,6 +586,21 @@ class RustPlusStore:
         items = [value for value in self.list_shop_watch_items(server_id) if value != item_id]
         self.set_shop_watch_items(server_id, items)
         return self.list_shop_watch_items(server_id)
+
+    def get_cargo_state(self, server_id: Optional[str]) -> Dict[str, Any]:
+        raw = self._data.get("cargo_state", {})
+        if not isinstance(raw, dict) or not server_id:
+            return {}
+        state = raw.get(server_id, {})
+        return state if isinstance(state, dict) else {}
+
+    def set_cargo_state(self, server_id: str, state: Dict[str, Any]) -> None:
+        raw = self._data.get("cargo_state", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        raw[server_id] = dict(state)
+        self._data["cargo_state"] = raw
+        self.save()
 
     def list_device_groups(self, server_id: Optional[str] = None) -> List[DeviceGroup]:
         groups = [DeviceGroup.from_dict(item) for item in self._data.get("device_groups", [])]
