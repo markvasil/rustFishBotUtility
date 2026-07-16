@@ -11,6 +11,7 @@ from features.furnace_calculator.calculator import calculate_furnace, FurnaceInp
 from features.genetics.calculator import calculate_crossbreed, normalize_genes
 from features.raid_calculator.calculator import calculate_entry
 from features.resource_machines.calculator import calculate_machine
+from features.shared_data import BATTERY_CAPACITY, ELECTRICITY_CONSUMERS
 from storage.session import SessionStore
 
 
@@ -223,6 +224,18 @@ def test_electricity():
     assert s.total_generation == 40
     assert s.total_consumption == 30
     assert s.net == 10
+    assert s.total_battery == 24000
+
+    m = calculate_electricity({"wind": 1}, {"sam": 2, "heater": 1}, {"medium": 2})
+    assert m.total_generation == 100
+    assert m.total_consumption == 53
+    assert m.net == 47
+    assert m.total_battery == 18000
+    assert "small" not in BATTERY_CAPACITY
+    assert set(BATTERY_CAPACITY) == {"medium", "large"}
+    assert len(ELECTRICITY_CONSUMERS) >= 30
+    assert BATTERY_CAPACITY["medium"][0] == "Средний аккумулятор"
+    assert BATTERY_CAPACITY["large"][0] == "Большой аккумулятор"
 
 
 def test_session():
