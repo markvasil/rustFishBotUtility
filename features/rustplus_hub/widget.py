@@ -58,7 +58,7 @@ class RustPlusHubFeature(Feature):
     VENDOR_OFFER_PAGE_SIZE = 20
     MAX_VENDOR_ORDERS = 3
     VENDOR_REFRESH_DEBOUNCE_MS = 500
-    MAP_SYNC_DEBOUNCE_MS = 900
+    MAP_SYNC_DEBOUNCE_MS = 200
 
     def __init__(
         self,
@@ -104,11 +104,13 @@ class RustPlusHubFeature(Feature):
         self._vendor_offers_cache: List[Dict[str, Any]] = []
         self._vendors_render_job: Optional[str] = None
         self._map_sync_job: Optional[str] = None
+        self._death_expiry_job: Optional[str] = None
         self._event_dock_job: Optional[str] = None
         self._vendors_signature: Optional[str] = None
         self._map_overlay_signature: Optional[str] = None
         self._map_preview: Optional[ctk.CTkLabel] = None
         self._map_image_ref: Optional[ctk.CTkImage] = None
+        self._map_pil_ref = None
         self._vendors_cache: List[Dict[str, Any]] = []
         self._vendor_icon_refs: List[ctk.CTkImage] = []
         self._vendor_icon_labels: Dict[int, ctk.CTkLabel] = {}
@@ -140,7 +142,6 @@ class RustPlusHubFeature(Feature):
         self._fcm_reset_btn: Optional[BusyButton] = None
         self._listener_start_btn: Optional[BusyButton] = None
         self._listener_stop_btn: Optional[BusyButton] = None
-        self._map_fetch_btn: Optional[BusyButton] = None
         self._map_busy_label: Optional[BusyLabel] = None
         self._devices_refresh_btn: Optional[BusyButton] = None
         self._devices_busy_label: Optional[BusyLabel] = None
@@ -592,13 +593,9 @@ class RustPlusHubFeature(Feature):
         self._refresh_cameras_panel()
 
     def _build_map_section(self, parent: ctk.CTkScrollableFrame) -> None:
-        self._section_title(parent, "Карта", "Миникарта: ЛКМ drag, ПКМ скрыть")
+        self._section_title(parent, "Карта", "Миникарта: ЛКМ drag, ПКМ скрыть · грузится после подключения")
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=4, pady=(0, 6))
-        self._map_fetch_btn = BusyButton(
-            btn_secondary(row, "Загрузить", self._fetch_map_action, width=100, height=30)
-        )
-        self._map_fetch_btn.widget.pack(side="left", padx=(0, 4))
         btn_primary(row, "Крупно", self._open_map_window, width=90, height=30).pack(side="left", padx=(0, 4))
         btn_secondary(row, "Миникарта", self._toggle_minimap, width=100, height=30).pack(side="left")
         self._map_busy_label = BusyLabel(parent)
@@ -643,7 +640,7 @@ class RustPlusHubFeature(Feature):
 
         self._map_preview = ctk.CTkLabel(
             parent,
-            text="Нажмите «Загрузить»",
+            text="Карта появится после подключения к серверу",
             height=self.MAP_PREVIEW_MAX[1] + 8,
             cursor="hand2",
             fg_color=Theme.PANEL,
@@ -867,7 +864,7 @@ class RustPlusHubFeature(Feature):
         ctk.CTkOptionMenu(
             poll_row,
             variable=self._poll_interval_var,
-            values=["5", "8", "10", "15", "20"],
+            values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
             width=90,
             height=28,
             command=lambda _value: self._save_poll_interval(),
@@ -881,7 +878,7 @@ class RustPlusHubFeature(Feature):
         ).pack(side="left", padx=(8, 0))
         hint_label(
             shop_body,
-            "5 с — быстрее всего. 20 с — щадящий режим. Слишком частый опрос может упереться в лимиты Rust+.",
+            "1 с — максимально часто. 10 с — щадящий режим. При 1–2 с возможны задержки из‑за лимитов Rust+.",
         )
         field_label(shop_body, "Item ID для расчёта profit")
         profit_row = ctk.CTkFrame(shop_body, fg_color="transparent")
@@ -1062,8 +1059,8 @@ class RustPlusHubFeature(Feature):
         try:
             interval = int(self._poll_interval_var.get())
         except ValueError:
-            interval = 10
-        interval = max(5, min(20, interval))
+            interval = 5
+        interval = max(1, min(10, interval))
         self._poll_interval_var.set(str(interval))
         settings = self._service.store.get_settings()
         settings.poll_interval_sec = interval
@@ -1196,8 +1193,36 @@ class RustPlusHubFeature(Feature):
     def _clear_deaths(self) -> None:
         server = self._service.get_active_server()
         self._service.store.clear_death_markers(server.id if server else None)
+        self._cancel_death_expiry_job()
         self._map_overlay_signature = None
         self._schedule_map_overlay_sync()
+
+    def _cancel_death_expiry_job(self) -> None:
+        if self._death_expiry_job and self._root:
+            try:
+                self._root.after_cancel(self._death_expiry_job)
+            except Exception:
+                pass
+            self._death_expiry_job = None
+
+    def _schedule_death_expiry_refresh(self) -> None:
+        """Когда истекает TTL метки смерти — убрать её с карты."""
+        self._cancel_death_expiry_job()
+        server = self._service.get_active_server()
+        server_id = server.id if server else None
+        remaining = self._service.store.next_death_marker_expiry_sec(server_id)
+        if remaining is None:
+            return
+        delay_ms = max(500, int(remaining * 1000) + 250)
+
+        def on_expire() -> None:
+            self._death_expiry_job = None
+            if self._service.store.prune_death_markers():
+                self._map_overlay_signature = None
+            self._schedule_map_overlay_sync()
+            self._schedule_death_expiry_refresh()
+
+        self._death_expiry_job = self._root.after(delay_ms, on_expire)
 
     def _show_profit(self) -> None:
         raw = self._profit_item_var.get().strip()
@@ -1703,6 +1728,10 @@ class RustPlusHubFeature(Feature):
             f"{v.get('id')}:{v.get('x')}:{v.get('y')}"
             for v in self._vendors_cache[:24]
         ]
+        death_bits = [
+            f"{d.get('steam_id')}:{d.get('ts')}:{d.get('x')}:{d.get('y')}"
+            for d in self._map_overlay_deaths(server_id)[:3]
+        ]
         return "|".join([
             str(server_id),
             str(self._map_size),
@@ -1713,6 +1742,7 @@ class RustPlusHubFeature(Feature):
             ",".join(team_bits),
             ",".join(event_bits),
             ",".join(vendor_bits),
+            ",".join(death_bits),
         ])
 
     def _sync_map_overlays(self) -> None:
@@ -1742,6 +1772,7 @@ class RustPlusHubFeature(Feature):
                 follow_steam_id=state["follow_steam_id"],
                 tracked_event_id=state["tracked_event_id"],
             )
+        self._schedule_death_expiry_refresh()
 
     def _track_event(self, event_id: Optional[int]) -> None:
         self._service.store.set_tracked_event_id(event_id)
@@ -2623,17 +2654,30 @@ class RustPlusHubFeature(Feature):
         self._map_path = path
         self._service.map_renderer.invalidate_base(path)
         try:
-            image = Image.open(path)
+            with Image.open(path) as src:
+                image = src.convert("RGB")
             image.thumbnail(self.MAP_PREVIEW_MAX, Image.Resampling.LANCZOS)
-            self._map_image_ref = ctk.CTkImage(
-                light_image=image, dark_image=image, size=image.size,
+            image = image.copy()
+            # Держим PIL + CTkImage, иначе Tk успевает уничтожить pyimage.
+            self._map_pil_ref = image
+            new_ref = ctk.CTkImage(
+                light_image=image,
+                dark_image=image.copy(),
+                size=(image.width, image.height),
             )
-            self._map_preview.configure(image=self._map_image_ref, text="")
+            self._map_preview.configure(image=new_ref, text="")
+            self._map_image_ref = new_ref
             self._minimap.update(path, self._map_overlay_team(), self._map_size)
             self._map_overlay_signature = None
             self._schedule_map_overlay_sync()
-        except Exception:
-            self._map_preview.configure(text="Не удалось показать карту")
+        except Exception as exc:
+            try:
+                self._map_preview.configure(image="", text="Не удалось показать карту")
+            except Exception:
+                pass
+            self._map_image_ref = None
+            self._map_pil_ref = None
+            print(f"[Rust+] map preview: {exc}")
         self._end_map_fetch()
         self.request_resize()
 
@@ -2664,6 +2708,7 @@ class RustPlusHubFeature(Feature):
             except Exception:
                 pass
             self._map_sync_job = None
+        self._cancel_death_expiry_job()
         if self._map_window and self._map_window.is_open:
             self._map_window.close()
         self._map_window = None
@@ -2729,18 +2774,19 @@ class RustPlusHubFeature(Feature):
     def _fetch_map_action(self) -> None:
         if not self._ops.acquire("map_fetch"):
             return
-        if self._map_fetch_btn:
-            self._map_fetch_btn.begin("Загрузка")
         if self._map_busy_label:
             self._map_busy_label.set("Загрузка карты с сервера…")
         if self._map_preview:
-            self._map_preview.configure(text="Загрузка карты…", image=None)
+            try:
+                self._map_preview.configure(text="Загрузка карты…", image="")
+            except Exception:
+                pass
+            self._map_image_ref = None
+            self._map_pil_ref = None
         self._service.fetch_map()
 
     def _end_map_fetch(self) -> None:
         self._ops.release("map_fetch")
-        if self._map_fetch_btn:
-            self._map_fetch_btn.end()
         if self._map_busy_label:
             self._map_busy_label.set("")
 
@@ -3013,6 +3059,8 @@ class RustPlusHubFeature(Feature):
             if self._info_label:
                 self._info_label.configure(text=f"Подключено: {event.payload.get('name', '')}")
             self._set_status(f"Подключено к {event.payload.get('name', '')}")
+            # Карта грузится сама после каждого успешного коннекта.
+            self._fetch_map_action()
         elif event.type == EventType.DISCONNECTED:
             self._end_connect()
             self._refresh_status()
@@ -3105,6 +3153,9 @@ class RustPlusHubFeature(Feature):
                 str(event.payload.get("message", "Событие на сервере")),
                 category=str(event.payload.get("category", "")),
             )
+            if str(event.payload.get("category", "")) == "death":
+                self._map_overlay_signature = None
+                self._schedule_map_overlay_sync()
         elif event.type == EventType.DEVICE_PAIRED:
             self._refresh_devices_panel()
             self._refresh_groups_label()
