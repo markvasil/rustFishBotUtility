@@ -1022,7 +1022,10 @@ class RustPlusHubFeature(Feature):
             return
         first = trades[0]
         self._profit_label.configure(
-            text=f"+{first['profit']} | {first['route']}",
+            text=(
+                f"+{first['profit_percent']}% · x{first['final_amount']} · "
+                f"{first['hops']} шага | {first['route']}"
+            ),
         )
 
     def _create_switch_group(self) -> None:
