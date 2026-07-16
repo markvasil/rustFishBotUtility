@@ -261,12 +261,16 @@ def test_cargo_live_grid_and_tracker():
     from rustplus.structs.rust_marker import RustMarker
     from services.rustplus.cargo_tracker import CargoTracker
     from services.rustplus.live_format import add_motion_vectors, world_to_grid
+    from services.rustplus.grid_coords import GRID_DIAMETER, GRID_ORIGIN
 
-    # Базовые квадраты совпадают с rustplus convert_coordinates.
-    assert world_to_grid(2000, 2000, 4000) == "N13"
     assert world_to_grid(0, 4000, 4000) == "A0"
-    # Граница квадрата: round не уезжает в соседний из-за trunc.
-    assert world_to_grid(146.4, 3854.0, 4000) == world_to_grid(146.0, 3854.0, 4000)
+    # Граница Q/R со сдвигом origin: ORIGIN + 17*150 = 2625.
+    q_r = GRID_ORIGIN + 17 * GRID_DIAMETER
+    assert abs(q_r - 2625.0) < 1e-6
+    assert world_to_grid(q_r - 1, 250, 3800).startswith("Q")
+    assert world_to_grid(q_r + 1, 250, 3800).startswith("R")
+    # Без сдвига (2550) точка уезжала в «середину» R — со сдвигом это ещё Q.
+    assert world_to_grid(2550, 250, 3800).startswith("Q")
 
     tracker = CargoTracker(harbor_seconds=600)
     cargo = {
@@ -281,25 +285,34 @@ def test_cargo_live_grid_and_tracker():
     assert any(a["kind"] == "cargo_arrival" for a in first["alerts"])
     assert first["status"]["grid"] == cargo["grid"]
 
-    # Смена квадрата не должна снова слать arrival.
     cargo2 = dict(cargo)
     cargo2["x"] = 1700.0
     cargo2["grid"] = world_to_grid(1700.0, 2500.0, 4000)
     second = tracker.update([cargo2])
     assert not any(a["kind"] == "cargo_arrival" for a in second["alerts"])
 
-    # После исчезновения state сбрасывается — повторное появление снова arrival.
     tracker.update([])
     assert tracker._cargo_seen is False
     again = tracker.update([cargo])
     assert any(a["kind"] == "cargo_arrival" for a in again["alerts"])
 
-    # Motion vectors дают ненулевую скорость между poll'ами.
     prev = [{"id": 1, "x": 100.0, "y": 100.0, "_sample_ts": 1000.0}]
     cur = [{"id": 1, "x": 200.0, "y": 150.0}]
     moved = add_motion_vectors(cur, prev, key_name="id", sample_ts=1010.0)
     assert abs(moved[0]["_vx"] - 10.0) < 1e-6
     assert abs(moved[0]["_vy"] - 5.0) < 1e-6
+    assert moved[0]["_from_x"] == 100.0
+    assert moved[0]["_to_x"] == 200.0
+    assert moved[0]["_interp_sec"] == 10.0
+
+    from services.rustplus.live_format import project_motion
+
+    mid = project_motion(moved, now_ts=1015.0)[0]
+    assert 100.0 < float(mid["x"]) < 200.0
+    assert 100.0 < float(mid["y"]) < 150.0
+    end = project_motion(moved, now_ts=1020.0)[0]
+    assert abs(float(end["x"]) - 200.0) < 1e-6
+    assert abs(float(end["y"]) - 150.0) < 1e-6
 
 
 if __name__ == "__main__":

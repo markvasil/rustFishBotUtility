@@ -6,7 +6,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from rustplus.structs.rust_marker import RustMarker
 from rustplus.structs.rust_team_info import RustTeamInfo
-from rustplus.utils.utils import convert_coordinates
+
+from services.rustplus.grid_coords import world_to_grid
 
 MARKER_TYPE_NAMES = {
     RustMarker.PlayerMarker: "Игрок",
@@ -33,18 +34,52 @@ VENDOR_MARKER_TYPES = {
 }
 
 
-def world_to_grid(x: float, y: float, map_size: int) -> str:
+def _clamp_map(value: float, map_size: Optional[int]) -> float:
     if not map_size:
-        return "?"
+        return value
+    return max(0.0, min(float(map_size), value))
+
+
+def _smoothstep(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def has_active_motion(
+    item: Dict[str, Any],
+    *,
+    now_ts: Optional[float] = None,
+    horizon_sec: float = 12.0,
+) -> bool:
+    """Есть ли ещё анимация/экстраполяция у маркера (для тиков карты)."""
     try:
-        # round вместо trunc: на границе квадрата int() давал соседнюю клетку.
-        col, row = convert_coordinates(
-            (int(round(float(x))), int(round(float(y)))),
-            int(map_size),
-        )
-        return f"{col}{row}"
-    except Exception:
-        return "?"
+        now_ts = float(now_ts or time.time())
+        sample_ts = float(item.get("_sample_ts") or now_ts)
+        age = max(0.0, now_ts - sample_ts)
+        interp = float(item.get("_interp_sec") or 0.0)
+        from_x = item.get("_from_x")
+        from_y = item.get("_from_y")
+        to_x = item.get("_to_x", item.get("x"))
+        to_y = item.get("_to_y", item.get("y"))
+        if (
+            from_x is not None
+            and from_y is not None
+            and to_x is not None
+            and to_y is not None
+            and (
+                abs(float(from_x) - float(to_x)) >= 0.5
+                or abs(float(from_y) - float(to_y)) >= 0.5
+            )
+            and age < interp + 0.05
+        ):
+            return True
+        vx = abs(float(item.get("_vx") or 0.0))
+        vy = abs(float(item.get("_vy") or 0.0))
+        if (vx > 0.05 or vy > 0.05) and age < interp + horizon_sec:
+            return True
+        return False
+    except (TypeError, ValueError):
+        return False
 
 
 def add_motion_vectors(
@@ -53,7 +88,9 @@ def add_motion_vectors(
     *,
     key_name: str,
     sample_ts: Optional[float] = None,
+    map_size: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """Добавляет скорость и сегмент интерполяции, чтобы иконки не телепортировались."""
     sample_ts = float(sample_ts or time.time())
     prev_by_key: Dict[Any, Dict[str, Any]] = {}
     for item in previous_items:
@@ -68,18 +105,48 @@ def add_motion_vectors(
         prev = prev_by_key.get(key)
         vx = 0.0
         vy = 0.0
+        if row.get("x") is None or row.get("y") is None:
+            enriched.append(row)
+            continue
+        try:
+            to_x = float(row["x"])
+            to_y = float(row["y"])
+        except (TypeError, ValueError, KeyError):
+            enriched.append(row)
+            continue
+
+        from_x = to_x
+        from_y = to_y
+        interp_sec = 1.0
         if prev is not None and prev.get("x") is not None and prev.get("y") is not None:
             prev_ts = float(prev.get("_sample_ts") or sample_ts)
             dt = max(0.001, sample_ts - prev_ts)
             try:
-                vx = (float(row.get("x") or 0.0) - float(prev.get("x") or 0.0)) / dt
-                vy = (float(row.get("y") or 0.0) - float(prev.get("y") or 0.0)) / dt
+                prev_x = float(prev.get("x") or 0.0)
+                prev_y = float(prev.get("y") or 0.0)
+                vx = (to_x - prev_x) / dt
+                vy = (to_y - prev_y) / dt
             except (TypeError, ValueError):
                 vx = 0.0
                 vy = 0.0
+            # Старт сегмента = где иконка уже нарисована (без скачка).
+            visual = project_motion([prev], now_ts=sample_ts, map_size=map_size)[0]
+            try:
+                from_x = float(visual.get("x") if visual.get("x") is not None else to_x)
+                from_y = float(visual.get("y") if visual.get("y") is not None else to_y)
+            except (TypeError, ValueError):
+                from_x, from_y = to_x, to_y
+            # Двигаемся к новой точке за типичный интервал между сэмплами.
+            interp_sec = min(20.0, max(0.75, dt))
+
         row["_sample_ts"] = sample_ts
         row["_vx"] = vx
         row["_vy"] = vy
+        row["_from_x"] = from_x
+        row["_from_y"] = from_y
+        row["_to_x"] = to_x
+        row["_to_y"] = to_y
+        row["_interp_sec"] = interp_sec
         enriched.append(row)
     return enriched
 
@@ -88,9 +155,10 @@ def project_motion(
     items: List[Dict[str, Any]],
     *,
     now_ts: Optional[float] = None,
-    horizon_sec: float = 2.5,
+    horizon_sec: float = 12.0,
     map_size: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """Плавная позиция: lerp from→to между poll'ами, затем короткая экстраполяция."""
     now_ts = float(now_ts or time.time())
     projected: List[Dict[str, Any]] = []
     for item in items:
@@ -100,13 +168,34 @@ def project_motion(
         if x is None or y is None:
             projected.append(row)
             continue
-        age = max(0.0, min(horizon_sec, now_ts - float(row.get("_sample_ts") or now_ts)))
         try:
-            px = float(x) + float(row.get("_vx") or 0.0) * age
-            py = float(y) + float(row.get("_vy") or 0.0) * age
-            if map_size:
-                px = max(0.0, min(float(map_size), px))
-                py = max(0.0, min(float(map_size), py))
+            sample_ts = float(row.get("_sample_ts") or now_ts)
+            age = max(0.0, now_ts - sample_ts)
+            vx = float(row.get("_vx") or 0.0)
+            vy = float(row.get("_vy") or 0.0)
+            to_x = float(row["_to_x"]) if row.get("_to_x") is not None else float(x)
+            to_y = float(row["_to_y"]) if row.get("_to_y") is not None else float(y)
+            from_x = float(row["_from_x"]) if row.get("_from_x") is not None else to_x
+            from_y = float(row["_from_y"]) if row.get("_from_y") is not None else to_y
+            interp_sec = float(row.get("_interp_sec") or 0.0)
+
+            if interp_sec > 0.0 and (from_x != to_x or from_y != to_y):
+                if age < interp_sec:
+                    t = _smoothstep(age / interp_sec)
+                    px = from_x + (to_x - from_x) * t
+                    py = from_y + (to_y - from_y) * t
+                else:
+                    overshoot = min(horizon_sec, age - interp_sec)
+                    px = to_x + vx * overshoot
+                    py = to_y + vy * overshoot
+            else:
+                # Старый формат / нет сегмента: dead reckoning от серверной точки.
+                extrap_age = min(horizon_sec, age)
+                px = float(x) + vx * extrap_age
+                py = float(y) + vy * extrap_age
+
+            px = _clamp_map(px, map_size)
+            py = _clamp_map(py, map_size)
             row["x"] = px
             row["y"] = py
             row["grid"] = world_to_grid(px, py, int(map_size or 0))
@@ -168,6 +257,7 @@ def format_marker(marker: RustMarker, map_size: Optional[int] = None) -> Dict[st
         "steam_id": marker.steam_id,
         "x": marker.x,
         "y": marker.y,
+        "rotation": float(getattr(marker, "rotation", 0) or 0),
         "grid": world_to_grid(marker.x, marker.y, map_size or 0),
         "out_of_stock": marker.out_of_stock,
         "sell_orders": orders,
