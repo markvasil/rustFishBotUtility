@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional, Set
+from typing import TYPE_CHECKING, Dict, Optional, Set, Union
 
 import customtkinter as ctk
 from PIL import Image
@@ -40,6 +42,9 @@ class CameraWindow:
         self._camera_id = camera_id
         self._controls = controls or {}
         self._image_ref: Optional[ctk.CTkImage] = None
+        self._pil_ref: Optional[Image.Image] = None
+        self._last_frame_at = 0.0
+        self._min_frame_interval = 0.05
         self._active_keys: Set[int] = set()
         self._last_mouse: Optional[tuple[int, int]] = None
         self._closed = False
@@ -127,25 +132,37 @@ class CameraWindow:
         color = "#f87171" if error else "#6b7280"
         self._label.configure(image=None, text=text, text_color=color)
         self._image_ref = None
+        self._pil_ref = None
 
     @property
     def is_open(self) -> bool:
         return not self._closed and self._win.winfo_exists()
 
-    def update_frame(self, image_path: str | Path) -> None:
+    def update_frame(self, source: Union[str, Path, bytes, bytearray, memoryview]) -> None:
         if not self.is_open:
             return
+        now = time.monotonic()
+        if now - self._last_frame_at < self._min_frame_interval:
+            return
         try:
-            image = Image.open(image_path)
+            if isinstance(source, (bytes, bytearray, memoryview)):
+                image = Image.open(io.BytesIO(bytes(source)))
+            else:
+                image = Image.open(source)
             if image.mode != "RGB":
                 image = image.convert("RGB")
             image.thumbnail(self.DISPLAY_MAX, Image.Resampling.LANCZOS)
+            image = image.copy()
+            self._pil_ref = image
             self._image_ref = ctk.CTkImage(
                 light_image=image, dark_image=image, size=image.size,
             )
             self._label.configure(image=self._image_ref, text="")
+            self._last_frame_at = now
         except Exception as exc:
-            self._label.configure(image=None, text=str(exc), text_color="#f87171")
+            # Не сбрасываем текущий кадр из-за одного битого обновления.
+            if self._image_ref is None:
+                self._label.configure(image=None, text=str(exc), text_color="#f87171")
 
     def close(self, *, notify_service: bool = True) -> None:
         if self._closed:
@@ -198,7 +215,8 @@ class CameraWindow:
         dy = event.y - self._last_mouse[1]
         self._last_mouse = (event.x, event.y)
         if dx or dy:
-            self._service.camera_look(float(dx) * 0.15, float(dy) * 0.15)
+            # Экранная ось Y направлена вниз, у камеры — наоборот.
+            self._service.camera_look(float(dx) * 0.15, float(-dy) * 0.15)
 
     def _on_mouse_release(self, _event) -> None:
         self._last_mouse = None

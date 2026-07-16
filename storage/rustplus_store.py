@@ -471,7 +471,7 @@ class RustPlusStore:
         return cameras
 
     def add_camera(self, server_id: str, camera_id: str, name: Optional[str] = None) -> PairedCamera:
-        camera_id = camera_id.strip().upper()
+        camera_id = camera_id.strip()
         cameras = self.list_cameras()
         for existing in cameras:
             if existing.server_id == server_id and existing.camera_id == camera_id:

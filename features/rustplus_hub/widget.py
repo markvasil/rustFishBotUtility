@@ -2015,7 +2015,7 @@ class RustPlusHubFeature(Feature):
         self._refresh_cameras_panel()
 
     def _open_camera_view(self, camera_id: str) -> None:
-        cam_id = camera_id.strip().upper()
+        cam_id = camera_id.strip()
         if not cam_id:
             self._set_status("Введите ID камеры", error=True)
             self._overlay.show_live_alert("Камера: введите ID")
@@ -2561,9 +2561,13 @@ class RustPlusHubFeature(Feature):
                 # иначе только что созданное окно мгновенно уничтожается.
                 print(f"[Rust+] camera closed event (UI kept): {cam_id}")
         elif event.type == EventType.CAMERA_FRAME:
+            frame_data = event.payload.get("data")
             path = event.payload.get("path")
-            if path and self._camera_window and self._camera_window.is_open:
-                self._camera_window.update_frame(str(path))
+            if self._camera_window and self._camera_window.is_open:
+                if frame_data is not None:
+                    self._camera_window.update_frame(frame_data)
+                elif path:
+                    self._camera_window.update_frame(str(path))
         self.request_resize()
 
 

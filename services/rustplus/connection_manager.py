@@ -776,7 +776,7 @@ class ConnectionManager:
         return "cargo"
 
     async def _open_camera(self, camera_id: str) -> None:
-        cam_id = camera_id.strip().upper()
+        cam_id = camera_id.strip()
         try:
             if not self._socket:
                 self._bus.emit(EventType.ERROR, message="Камера: нет подключения")
@@ -859,11 +859,9 @@ class ConnectionManager:
             self._bus.emit(EventType.CAMERA_STATUS, open=False, camera_id=closed_id)
 
     async def _camera_frame_loop(self) -> None:
+        import io
         import time
 
-        from app_paths import get_rustplus_dir
-
-        path = get_rustplus_dir() / "camera_live.jpg"
         try:
             while self._camera_manager and self._camera_manager._open:
                 # Подписка Rust+ живёт ~15 с — нужно продлевать
@@ -874,10 +872,11 @@ class ConnectionManager:
                     if frame is not None:
                         if frame.mode != "RGB":
                             frame = frame.convert("RGB")
-                        frame.save(path, format="JPEG", quality=75)
+                        buf = io.BytesIO()
+                        frame.save(buf, format="JPEG", quality=75)
                         self._bus.emit(
                             EventType.CAMERA_FRAME,
-                            path=str(path),
+                            data=buf.getvalue(),
                             camera_id=self._camera_id,
                         )
                 await asyncio.sleep(0.08)
