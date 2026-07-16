@@ -34,6 +34,7 @@ class AlertManager:
             "cargo_arrival": s.cargo_arrival,
             "cargo_docking": s.cargo_docking,
             "cargo_departure": s.cargo_departure,
+            "team_online": s.team_online,
         }
         return mapping.get(category, True)
 

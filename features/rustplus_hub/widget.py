@@ -598,6 +598,7 @@ class RustPlusHubFeature(Feature):
             "cargo_arrival": ctk.BooleanVar(value=alerts.cargo_arrival),
             "cargo_docking": ctk.BooleanVar(value=alerts.cargo_docking),
             "cargo_departure": ctk.BooleanVar(value=alerts.cargo_departure),
+            "team_online": ctk.BooleanVar(value=alerts.team_online),
         }
         alerts_body = settings_group(
             parent,
@@ -616,6 +617,7 @@ class RustPlusHubFeature(Feature):
             "cargo_arrival": "Cargo intel: первое появление/сектор",
             "cargo_docking": "Cargo intel: постановка в порт",
             "cargo_departure": "Cargo intel: предупреждение перед отходом",
+            "team_online": "Смена online/offline у тиммейтов без спама при reconnect",
         }
         for key, label in [
             ("cargo", "Карго"), ("death", "Смерть"), ("shop", "Магазины"), ("alarm", "Alarm"),
@@ -626,6 +628,7 @@ class RustPlusHubFeature(Feature):
             ("cargo_arrival", "Cargo: Arrival"),
             ("cargo_docking", "Cargo: Docking"),
             ("cargo_departure", "Cargo: Departure"),
+            ("team_online", "Team: Online"),
         ]:
             row = ctk.CTkFrame(alerts_body, fg_color="transparent")
             row.pack(fill="x", pady=2)
@@ -926,6 +929,7 @@ class RustPlusHubFeature(Feature):
             cargo_arrival=self._alert_vars["cargo_arrival"].get(),
             cargo_docking=self._alert_vars["cargo_docking"].get(),
             cargo_departure=self._alert_vars["cargo_departure"].get(),
+            team_online=self._alert_vars["team_online"].get(),
         )
         self._service.update_alert_settings(alerts)
         self._map_overlay_signature = None
@@ -2454,6 +2458,7 @@ class RustPlusHubFeature(Feature):
             "cargo_arrival": alerts.cargo_arrival,
             "cargo_docking": alerts.cargo_docking,
             "cargo_departure": alerts.cargo_departure,
+            "team_online": alerts.team_online,
         }
         if category and category in allowed and not allowed[category]:
             return

@@ -68,6 +68,7 @@ class AlertSettings:
     cargo_arrival: bool = True
     cargo_docking: bool = True
     cargo_departure: bool = True
+    team_online: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -86,6 +87,7 @@ class AlertSettings:
             cargo_arrival=bool(data.get("cargo_arrival", True)),
             cargo_docking=bool(data.get("cargo_docking", True)),
             cargo_departure=bool(data.get("cargo_departure", True)),
+            team_online=bool(data.get("team_online", True)),
         )
 
 
