@@ -5,7 +5,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from services.rustplus.live_format import world_to_grid
-from storage.rustplus_store import PairedDevice, RustPlusStore
+from storage.rustplus_store import DeviceAlias, PairedDevice, RustPlusStore
 
 
 class ChatCommandHandler:
@@ -81,9 +81,36 @@ class ChatCommandHandler:
         ]
         if not name_filter:
             return devices
+        alias_match = self._resolve_switch_alias(server_id, name_filter)
+        if alias_match:
+            return alias_match
         filt = name_filter.lower()
         matched = [d for d in devices if filt in d.name.lower()]
         return matched or devices[:1]
+
+    def _resolve_switch_alias(self, server_id: str, raw_alias: str) -> List[PairedDevice]:
+        alias = raw_alias.strip().lower()
+        if not alias:
+            return []
+        aliases = [a for a in self._store.list_device_aliases(server_id) if a.alias == alias]
+        if not aliases:
+            return []
+        devices = self._store.list_devices(server_id)
+        groups = {g.id: g for g in self._store.list_device_groups(server_id)}
+        resolved: List[PairedDevice] = []
+        for entry in aliases:
+            if entry.device_id:
+                device = next((d for d in devices if d.id == entry.device_id and d.device_type == "smart_switch"), None)
+                if device:
+                    resolved.append(device)
+            elif entry.group_id and entry.group_id in groups:
+                group = groups[entry.group_id]
+                resolved.extend([
+                    d for d in devices
+                    if d.id in group.device_ids and d.device_type == "smart_switch"
+                ])
+        uniq: Dict[str, PairedDevice] = {d.id: d for d in resolved}
+        return list(uniq.values())
 
     def _switch_command(self, value: bool, name_filter: str) -> None:
         devices = self._switches(name_filter)
