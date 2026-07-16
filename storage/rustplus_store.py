@@ -122,6 +122,8 @@ class AppSettings:
     crosshair_gap: int = 4
     crosshair_thickness: int = 2
     crosshair_color: str = "#00ff00"
+    crosshair_image_path: str = ""
+    crosshair_presets: List[Dict[str, Any]] = field(default_factory=list)
     tracked_event_id: Optional[int] = None
     poll_interval_sec: int = 10
 
@@ -149,6 +151,11 @@ class AppSettings:
             crosshair_gap=int(data.get("crosshair_gap", 4)),
             crosshair_thickness=int(data.get("crosshair_thickness", 2)),
             crosshair_color=str(data.get("crosshair_color", "#00ff00")),
+            crosshair_image_path=str(data.get("crosshair_image_path", "")),
+            crosshair_presets=[
+                item for item in data.get("crosshair_presets", [])
+                if isinstance(item, dict)
+            ],
             tracked_event_id=int(data["tracked_event_id"]) if data.get("tracked_event_id") else None,
             poll_interval_sec=max(5, min(20, int(data.get("poll_interval_sec", 10)))),
         )

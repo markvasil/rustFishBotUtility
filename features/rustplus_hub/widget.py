@@ -834,9 +834,27 @@ class RustPlusHubFeature(Feature):
         params.pack(fill="x")
         self._cross_size_var = ctk.StringVar(value=str(settings.crosshair_size))
         self._cross_color_var = ctk.StringVar(value=settings.crosshair_color)
+        self._cross_image_var = ctk.StringVar(value=settings.crosshair_image_path)
+        self._cross_preset_var = ctk.StringVar(value="preset")
         ctk.CTkEntry(params, textvariable=self._cross_size_var, width=50, height=28, corner_radius=8).pack(side="left", padx=(0, 6))
         ctk.CTkEntry(params, textvariable=self._cross_color_var, width=80, height=28, placeholder_text="#00ff00", corner_radius=8).pack(side="left", padx=(0, 6))
         btn_secondary(params, "Сохранить", self._save_crosshair, width=90, height=28).pack(side="left")
+        image_row = ctk.CTkFrame(cross_body, fg_color="transparent")
+        image_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkEntry(
+            image_row, textvariable=self._cross_image_var, height=28, corner_radius=8,
+            placeholder_text="PNG path",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        btn_secondary(image_row, "PNG...", self._pick_crosshair_image, width=80, height=28).pack(side="left", padx=(0, 6))
+        btn_secondary(image_row, "Очистить", self._clear_crosshair_image, width=80, height=28).pack(side="left")
+        preset_row = ctk.CTkFrame(cross_body, fg_color="transparent")
+        preset_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkEntry(
+            preset_row, textvariable=self._cross_preset_var, width=120, height=28, corner_radius=8,
+            placeholder_text="preset",
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(preset_row, "Сохранить preset", self._save_crosshair_preset, width=120, height=28).pack(side="left", padx=(0, 6))
+        btn_secondary(preset_row, "Применить preset", self._apply_crosshair_preset, width=120, height=28).pack(side="left")
 
         sound_body = settings_group(
             parent,
@@ -985,9 +1003,59 @@ class RustPlusHubFeature(Feature):
         except ValueError:
             pass
         settings.crosshair_color = self._cross_color_var.get().strip() or "#00ff00"
+        settings.crosshair_image_path = self._cross_image_var.get().strip() if hasattr(self, "_cross_image_var") else ""
         self._service.update_app_settings(settings)
         if self._crosshair:
             self._crosshair.apply_settings()
+
+    def _pick_crosshair_image(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Выберите PNG прицела",
+            filetypes=[("PNG", "*.png")],
+        )
+        if not path:
+            return
+        self._cross_image_var.set(path)
+        self._save_crosshair()
+        self._set_status("PNG прицел сохранён")
+
+    def _clear_crosshair_image(self) -> None:
+        self._cross_image_var.set("")
+        self._save_crosshair()
+        self._set_status("PNG прицел очищен")
+
+    def _save_crosshair_preset(self) -> None:
+        name = self._cross_preset_var.get().strip() if hasattr(self, "_cross_preset_var") else ""
+        if not name:
+            self._set_status("Укажите имя preset", error=True)
+            return
+        settings = self._service.store.get_settings()
+        preset = {
+            "name": name,
+            "size": self._cross_size_var.get().strip(),
+            "color": self._cross_color_var.get().strip(),
+            "image_path": self._cross_image_var.get().strip(),
+        }
+        presets = [p for p in settings.crosshair_presets if str(p.get("name", "")).strip().lower() != name.lower()]
+        presets.append(preset)
+        settings.crosshair_presets = presets[:12]
+        self._service.update_app_settings(settings)
+        self._set_status(f"Preset сохранён: {name}")
+
+    def _apply_crosshair_preset(self) -> None:
+        name = self._cross_preset_var.get().strip() if hasattr(self, "_cross_preset_var") else ""
+        settings = self._service.store.get_settings()
+        preset = next((p for p in settings.crosshair_presets if str(p.get("name", "")).strip().lower() == name.lower()), None)
+        if not preset:
+            self._set_status("Preset не найден", error=True)
+            return
+        self._cross_size_var.set(str(preset.get("size", settings.crosshair_size)))
+        self._cross_color_var.set(str(preset.get("color", settings.crosshair_color)))
+        self._cross_image_var.set(str(preset.get("image_path", "")))
+        self._save_crosshair()
+        self._set_status(f"Preset применён: {name}")
 
     def _save_alarm_sound(self) -> None:
         settings = self._service.store.get_settings()
