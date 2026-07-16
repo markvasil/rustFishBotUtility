@@ -112,6 +112,23 @@ class ConnectionManager:
             return
         asyncio.run_coroutine_threadsafe(self._set_entity(entity_id, value), self._loop)
 
+    def promote_team_leader(self, steam_id: int, member_name: str) -> None:
+        if not self._loop or not self.is_connected:
+            self._bus.emit(EventType.ERROR, message="Лидер: сначала подключитесь к серверу")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            self._promote_team_leader(steam_id, member_name),
+            self._loop,
+        )
+
+        def _report(done) -> None:
+            try:
+                done.result()
+            except Exception as exc:
+                self._bus.emit(EventType.ERROR, message=f"Лидер: {exc}")
+
+        future.add_done_callback(_report)
+
     def fetch_map(self) -> None:
         if not self._loop or not self.is_connected:
             self._bus.emit(EventType.ERROR, message="Карта: сначала подключитесь к серверу")
@@ -294,6 +311,7 @@ class ConnectionManager:
             self._chat_commands = ChatCommandHandler(
                 self._store,
                 send_message=lambda text: self.send_team_message(text),
+                promote_team_leader=self.promote_team_leader,
                 set_entity=self.set_entity_value,
                 get_entity_info=self.get_entity_info_sync,
                 get_server_time_raw=lambda: self._server_time_raw,
@@ -719,6 +737,59 @@ class ConnectionManager:
             await self._socket.send_team_message(message)
         except Exception:
             pass
+
+    async def _promote_team_leader(self, steam_id: int, member_name: str) -> None:
+        if not self._socket or not self._connected_server:
+            raise RuntimeError("нет подключения")
+        team = self._team_cache or {}
+        leader_id = int(team.get("leader_steam_id") or 0)
+        if int(self._connected_server.player_id) != leader_id:
+            try:
+                await self._socket.send_team_message("!leader: приложение должно быть открыто у текущего лидера")
+            except Exception:
+                pass
+            return
+        if leader_id == int(steam_id):
+            try:
+                await self._socket.send_team_message(f"!leader: {member_name} уже лидер")
+            except Exception:
+                pass
+            return
+        members = team.get("members", [])
+        if not any(int(m.get("steam_id") or 0) == int(steam_id) for m in members):
+            try:
+                await self._socket.send_team_message("!leader: игрок не найден в команде")
+            except Exception:
+                pass
+            return
+
+        await self._socket.promote_to_team_leader(int(steam_id))
+        await asyncio.sleep(1.0)
+        refreshed = await self._socket.get_team_info()
+        if isinstance(refreshed, RustError):
+            try:
+                await self._socket.send_team_message(
+                    f"!leader: запрос отправлен, но подтверждение не получено ({refreshed.reason})",
+                )
+            except Exception:
+                pass
+            return
+
+        payload = format_team(refreshed, self._map_size)
+        self._team_cache = payload
+        self._bus.emit(EventType.TEAM_INFO, **payload)
+        if int(payload.get("leader_steam_id") or 0) == int(steam_id):
+            try:
+                await self._socket.send_team_message(f"Лидер команды: {member_name}")
+            except Exception:
+                pass
+        else:
+            try:
+                await self._socket.send_team_message(
+                    f"!leader: не удалось подтвердить передачу лидерства {member_name}",
+                )
+            except Exception:
+                pass
 
     async def _get_entity_info(self, entity_id: int) -> Any:
         if not self._socket:
