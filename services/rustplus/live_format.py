@@ -37,7 +37,11 @@ def world_to_grid(x: float, y: float, map_size: int) -> str:
     if not map_size:
         return "?"
     try:
-        col, row = convert_coordinates((int(x), int(y)), map_size)
+        # round вместо trunc: на границе квадрата int() давал соседнюю клетку.
+        col, row = convert_coordinates(
+            (int(round(float(x))), int(round(float(y)))),
+            int(map_size),
+        )
         return f"{col}{row}"
     except Exception:
         return "?"

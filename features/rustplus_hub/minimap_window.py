@@ -15,6 +15,7 @@ class MinimapWindow:
     """Компактная карта поверх игры (always-on-top) с drag и оверлеями."""
 
     PREVIEW_SIZE = (300, 300)
+    MOVE_REFRESH_MS = 400
 
     def __init__(
         self,
@@ -79,12 +80,26 @@ class MinimapWindow:
         if tracked_event_id is not None:
             self._tracked_event_id = tracked_event_id
         if self.is_visible and self._path:
-            self._schedule_apply_image()
+            delay = self.MOVE_REFRESH_MS if self._has_moving_overlay() else self._render_delay_ms
+            self._schedule_apply_image(delay)
 
-    def _schedule_apply_image(self) -> None:
+    def _has_moving_overlay(self) -> bool:
+        for group in (self._team_members, self._events, self._vendors):
+            for item in group:
+                try:
+                    if abs(float(item.get("_vx") or 0.0)) > 0.05:
+                        return True
+                    if abs(float(item.get("_vy") or 0.0)) > 0.05:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
+    def _schedule_apply_image(self, delay_ms: Optional[int] = None) -> None:
         if self._render_job:
             self._root.after_cancel(self._render_job)
-        self._render_job = self._root.after(self._render_delay_ms, self._run_apply_image)
+        delay = self._render_delay_ms if delay_ms is None else int(delay_ms)
+        self._render_job = self._root.after(delay, self._run_apply_image)
 
     def _run_apply_image(self) -> None:
         self._render_job = None

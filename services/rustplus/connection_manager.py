@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from rustplus import ChatEvent, EntityEvent, RustSocket, ServerDetails, TeamEvent
 from rustplus.remote.camera.camera_constants import CameraMovementOptions
 from rustplus.structs import RustError
+from rustplus.structs.rust_marker import RustMarker
 from rustplus.structs.util import Vector
 
 from services.rustplus.alert_manager import AlertManager
@@ -514,11 +515,12 @@ class ConnectionManager:
             from app_paths import get_rustplus_dir
 
             self._bus.emit(EventType.STATUS, message="Загрузка карты...")
-            alerts = self._store.get_alert_settings()
             layers = self._store.get_map_layers()
+            # События (cargo/heli/chinook) не запекаем в JPEG — их рисует live-оверлей,
+            # иначе на карте остаётся «застывшая» позиция с момента загрузки.
             map_image = await self._socket.get_map(
                 add_icons=layers.monuments,
-                add_events=alerts.cargo,
+                add_events=False,
                 add_vending_machines=layers.shops,
                 add_team_positions=layers.players,
                 add_grid=True,
@@ -716,7 +718,7 @@ class ConnectionManager:
                     cargo_status = cargo_update.get("status") if isinstance(cargo_update, dict) else None
                     if cargo_status:
                         for event in payload.get("events", []):
-                            if event.get("type_name") == "Карго":
+                            if event.get("type") == RustMarker.CargoShipMarker:
                                 event["cargo_status"] = cargo_status
                     for cargo_alert in cargo_update.get("alerts", []) if isinstance(cargo_update, dict) else []:
                         kind = str(cargo_alert.get("kind", "cargo"))

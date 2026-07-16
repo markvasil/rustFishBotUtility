@@ -257,6 +257,51 @@ def test_furnace_from_refined():
     assert f.metal_ore == 50
 
 
+def test_cargo_live_grid_and_tracker():
+    from rustplus.structs.rust_marker import RustMarker
+    from services.rustplus.cargo_tracker import CargoTracker
+    from services.rustplus.live_format import add_motion_vectors, world_to_grid
+
+    # Базовые квадраты совпадают с rustplus convert_coordinates.
+    assert world_to_grid(2000, 2000, 4000) == "N13"
+    assert world_to_grid(0, 4000, 4000) == "A0"
+    # Граница квадрата: round не уезжает в соседний из-за trunc.
+    assert world_to_grid(146.4, 3854.0, 4000) == world_to_grid(146.0, 3854.0, 4000)
+
+    tracker = CargoTracker(harbor_seconds=600)
+    cargo = {
+        "id": 1,
+        "type": RustMarker.CargoShipMarker,
+        "type_name": "Карго",
+        "x": 1500.0,
+        "y": 2500.0,
+        "grid": world_to_grid(1500.0, 2500.0, 4000),
+    }
+    first = tracker.update([cargo])
+    assert any(a["kind"] == "cargo_arrival" for a in first["alerts"])
+    assert first["status"]["grid"] == cargo["grid"]
+
+    # Смена квадрата не должна снова слать arrival.
+    cargo2 = dict(cargo)
+    cargo2["x"] = 1700.0
+    cargo2["grid"] = world_to_grid(1700.0, 2500.0, 4000)
+    second = tracker.update([cargo2])
+    assert not any(a["kind"] == "cargo_arrival" for a in second["alerts"])
+
+    # После исчезновения state сбрасывается — повторное появление снова arrival.
+    tracker.update([])
+    assert tracker._cargo_seen is False
+    again = tracker.update([cargo])
+    assert any(a["kind"] == "cargo_arrival" for a in again["alerts"])
+
+    # Motion vectors дают ненулевую скорость между poll'ами.
+    prev = [{"id": 1, "x": 100.0, "y": 100.0, "_sample_ts": 1000.0}]
+    cur = [{"id": 1, "x": 200.0, "y": 150.0}]
+    moved = add_motion_vectors(cur, prev, key_name="id", sample_ts=1010.0)
+    assert abs(moved[0]["_vx"] - 10.0) < 1e-6
+    assert abs(moved[0]["_vy"] - 5.0) < 1e-6
+
+
 if __name__ == "__main__":
     test_raid()
     test_craft()
@@ -269,4 +314,5 @@ if __name__ == "__main__":
     test_electricity()
     test_session()
     test_furnace_from_refined()
+    test_cargo_live_grid_and_tracker()
     print("ALL TESTS PASSED")

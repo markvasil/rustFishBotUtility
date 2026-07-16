@@ -685,7 +685,7 @@ class RustPlusHubFeature(Feature):
             "spawn_chinook": "Team chat: спавн Chinook",
             "spawn_cargo": "Team chat: появление Cargo Ship",
             "spawn_vendor": "Team chat: появление бродячего торговца",
-            "cargo_arrival": "Cargo intel: первое появление/сектор",
+            "cargo_arrival": "Cargo intel: первое появление",
             "cargo_docking": "Cargo intel: постановка в порт",
             "cargo_departure": "Cargo intel: предупреждение перед отходом",
             "team_online": "Смена online/offline у тиммейтов без спама при reconnect",
@@ -1685,6 +1685,21 @@ class RustPlusHubFeature(Feature):
             f"{m.get('steam_id')}:{int(bool(m.get('is_online')))}:{m.get('x')}:{m.get('y')}"
             for m in team[:16]
         ]
+        # Координаты событий обязательны: иначе cargo/heli «замирают» при том же числе маркеров.
+        event_bits = [
+            "{id}:{x:.1f}:{y:.1f}:{vx:.2f}:{vy:.2f}".format(
+                id=e.get("id"),
+                x=float(e.get("x") or 0.0),
+                y=float(e.get("y") or 0.0),
+                vx=float(e.get("_vx") or 0.0),
+                vy=float(e.get("_vy") or 0.0),
+            )
+            for e in self._events_cache[:32]
+        ]
+        vendor_bits = [
+            f"{v.get('id')}:{v.get('x')}:{v.get('y')}"
+            for v in self._vendors_cache[:24]
+        ]
         return "|".join([
             str(server_id),
             str(self._map_size),
@@ -1693,6 +1708,8 @@ class RustPlusHubFeature(Feature):
             str(self._service.store.get_follow_steam_id()),
             str(self._service.store.get_tracked_event_id()),
             ",".join(team_bits),
+            ",".join(event_bits),
+            ",".join(vendor_bits),
         ])
 
     def _sync_map_overlays(self) -> None:
@@ -1833,6 +1850,12 @@ class RustPlusHubFeature(Feature):
         cargo_status = event.get("cargo_status") or {}
         if cargo_status:
             remaining = cargo_status.get("remaining_minutes")
+            harbor_since = cargo_status.get("harbor_since")
+            harbor_seconds = cargo_status.get("harbor_seconds")
+            if cargo_status.get("in_harbor") and harbor_since and harbor_seconds:
+                import time as _time
+
+                remaining = max(0, int((float(harbor_seconds) - (_time.time() - float(harbor_since))) / 60))
             if cargo_status.get("in_harbor") and remaining is not None:
                 badges.append((f"порт {remaining} мин", Theme.WARN))
             route = cargo_status.get("route") or []

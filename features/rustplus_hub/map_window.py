@@ -160,10 +160,22 @@ class MapWindow:
         if self.is_open:
             self._win.lift()
 
+    def _has_moving_overlay(self) -> bool:
+        for group in (self._team, self._events, self._vendors):
+            for item in group:
+                try:
+                    if abs(float(item.get("_vx") or 0.0)) > 0.05:
+                        return True
+                    if abs(float(item.get("_vy") or 0.0)) > 0.05:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
     def _start_tick(self) -> None:
         def tick():
             if self.is_open:
-                if self._follow_steam_id or self._dirty:
+                if self._follow_steam_id or self._dirty or self._has_moving_overlay():
                     self._render_frame()
                 self._tick_job = self._win.after(self.TICK_MS, tick)
         self._tick_job = self._win.after(self.TICK_MS, tick)
