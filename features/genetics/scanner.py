@@ -967,10 +967,26 @@ class GeneScanner:
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.5)
-        self._thread = None
-        self._on_status("Сканирование остановлено")
+
+    def stop_async(self, on_stopped: Optional[Callable[[], None]] = None) -> None:
+        self._stop_event.set()
+        self._on_status("Останавливаем сканирование…")
+        thread = self._thread
+        if not thread or not thread.is_alive():
+            self._thread = None
+            self._on_status("Сканирование остановлено")
+            if on_stopped:
+                on_stopped()
+            return
+
+        def waiter() -> None:
+            thread.join(timeout=2.0)
+            self._thread = None
+            self._on_status("Сканирование остановлено")
+            if on_stopped:
+                on_stopped()
+
+        threading.Thread(target=waiter, daemon=True, name="GeneScannerStop").start()
 
     def _run_loop(self) -> None:
         try:
