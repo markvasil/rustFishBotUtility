@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
 from typing import Callable, Optional
 
 import customtkinter as ctk
+from PIL import Image, ImageTk
 
 from storage.rustplus_store import AppSettings
 
@@ -17,6 +19,7 @@ class CrosshairWindow:
         self._win: Optional[tk.Toplevel] = None
         self._canvas: Optional[tk.Canvas] = None
         self._visible = False
+        self._image_ref: Optional[ImageTk.PhotoImage] = None
 
     @property
     def is_visible(self) -> bool:
@@ -73,6 +76,16 @@ class CrosshairWindow:
         gap = max(0, settings.crosshair_gap)
         thick = max(1, settings.crosshair_thickness)
         color = settings.crosshair_color
+        image_path = Path(settings.crosshair_image_path) if settings.crosshair_image_path else None
+        if image_path and image_path.exists():
+            try:
+                image = Image.open(image_path)
+                image.thumbnail((128, 128), Image.Resampling.LANCZOS)
+                self._image_ref = ImageTk.PhotoImage(image)
+                self._canvas.create_image(cx, cy, image=self._image_ref)
+                return
+            except Exception:
+                self._image_ref = None
         self._canvas.create_line(cx, cy - gap - size, cx, cy - gap, fill=color, width=thick)
         self._canvas.create_line(cx, cy + gap, cx, cy + gap + size, fill=color, width=thick)
         self._canvas.create_line(cx - gap - size, cy, cx - gap, cy, fill=color, width=thick)
