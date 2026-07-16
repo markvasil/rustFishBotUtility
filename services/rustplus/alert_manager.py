@@ -31,6 +31,9 @@ class AlertManager:
             "spawn_chinook": s.spawn_chinook,
             "spawn_cargo": s.spawn_cargo,
             "spawn_vendor": s.spawn_vendor,
+            "cargo_arrival": s.cargo_arrival,
+            "cargo_docking": s.cargo_docking,
+            "cargo_departure": s.cargo_departure,
         }
         return mapping.get(category, True)
 

@@ -327,6 +327,7 @@ class ConnectionManager:
             self._cargo_tracker = CargoTracker(
                 send_chat=lambda text: self.send_team_message(text),
             )
+            self._cargo_tracker.hydrate(self._store.get_cargo_state(server.id))
 
             if self._poll_task:
                 self._poll_task.cancel()
@@ -705,14 +706,31 @@ class ConnectionManager:
                                     await self._socket.send_team_message(self._spawn_chat_message(event))
                                 except Exception:
                                     pass
-                    cargo_msg = self._cargo_tracker.update(payload.get("events", []))
-                    if cargo_msg and self._alert_manager.should_emit("cargo"):
-                        self._bus.emit(
-                            EventType.LIVE_ALERT,
-                            title="Карго",
-                            message=cargo_msg,
-                            category="cargo",
+                    cargo_update = self._cargo_tracker.update(payload.get("events", []))
+                    if self._connected_server:
+                        self._store.set_cargo_state(
+                            self._connected_server.id,
+                            self._cargo_tracker.export_state(),
                         )
+                    cargo_status = cargo_update.get("status") if isinstance(cargo_update, dict) else None
+                    if cargo_status:
+                        for event in payload.get("events", []):
+                            if event.get("type_name") == "Карго":
+                                event["cargo_status"] = cargo_status
+                    for cargo_alert in cargo_update.get("alerts", []) if isinstance(cargo_update, dict) else []:
+                        kind = str(cargo_alert.get("kind", "cargo"))
+                        if self._alert_manager.should_emit(kind):
+                            self._bus.emit(
+                                EventType.LIVE_ALERT,
+                                title="Карго",
+                                message=str(cargo_alert.get("message", "Карго")),
+                                category=kind,
+                            )
+                            if self._socket:
+                                try:
+                                    await self._socket.send_team_message(str(cargo_alert.get("message", "Карго")))
+                                except Exception:
+                                    pass
                     for alert in self._shop_tracker.detect_changes(
                         payload.get("vendors", []),
                         alerts_enabled=self._alert_manager.should_emit("shop"),

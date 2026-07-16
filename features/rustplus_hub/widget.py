@@ -593,6 +593,9 @@ class RustPlusHubFeature(Feature):
             "spawn_chinook": ctk.BooleanVar(value=alerts.spawn_chinook),
             "spawn_cargo": ctk.BooleanVar(value=alerts.spawn_cargo),
             "spawn_vendor": ctk.BooleanVar(value=alerts.spawn_vendor),
+            "cargo_arrival": ctk.BooleanVar(value=alerts.cargo_arrival),
+            "cargo_docking": ctk.BooleanVar(value=alerts.cargo_docking),
+            "cargo_departure": ctk.BooleanVar(value=alerts.cargo_departure),
         }
         alerts_body = settings_group(
             parent,
@@ -608,6 +611,9 @@ class RustPlusHubFeature(Feature):
             "spawn_chinook": "Team chat: спавн Chinook",
             "spawn_cargo": "Team chat: появление Cargo Ship",
             "spawn_vendor": "Team chat: появление бродячего торговца",
+            "cargo_arrival": "Cargo intel: первое появление/сектор",
+            "cargo_docking": "Cargo intel: постановка в порт",
+            "cargo_departure": "Cargo intel: предупреждение перед отходом",
         }
         for key, label in [
             ("cargo", "Карго"), ("death", "Смерть"), ("shop", "Магазины"), ("alarm", "Alarm"),
@@ -615,6 +621,9 @@ class RustPlusHubFeature(Feature):
             ("spawn_chinook", "Spawn: Chinook"),
             ("spawn_cargo", "Spawn: Cargo"),
             ("spawn_vendor", "Spawn: Vendor"),
+            ("cargo_arrival", "Cargo: Arrival"),
+            ("cargo_docking", "Cargo: Docking"),
+            ("cargo_departure", "Cargo: Departure"),
         ]:
             row = ctk.CTkFrame(alerts_body, fg_color="transparent")
             row.pack(fill="x", pady=2)
@@ -878,6 +887,9 @@ class RustPlusHubFeature(Feature):
             spawn_chinook=self._alert_vars["spawn_chinook"].get(),
             spawn_cargo=self._alert_vars["spawn_cargo"].get(),
             spawn_vendor=self._alert_vars["spawn_vendor"].get(),
+            cargo_arrival=self._alert_vars["cargo_arrival"].get(),
+            cargo_docking=self._alert_vars["cargo_docking"].get(),
+            cargo_departure=self._alert_vars["cargo_departure"].get(),
         )
         self._service.update_alert_settings(alerts)
         self._map_overlay_signature = None
@@ -1490,9 +1502,17 @@ class RustPlusHubFeature(Feature):
             return
         for event in events[:10]:
             eid = event.get("id")
+            cargo_status = event.get("cargo_status") or {}
+            status_suffix = ""
+            if cargo_status:
+                remaining = cargo_status.get("remaining_minutes")
+                if cargo_status.get("in_harbor") and remaining is not None:
+                    status_suffix = f" | порт {remaining} мин"
+                elif cargo_status.get("route"):
+                    status_suffix = f" | route {' → '.join(cargo_status.get('route', [])[-3:])}"
             btn = ctk.CTkButton(
                 self._events_frame,
-                text=f"{event.get('type_name', '?')} — {event.get('grid', '?')} → трек",
+                text=f"{event.get('type_name', '?')} — {event.get('grid', '?')}{status_suffix} → трек",
                 anchor="w",
                 height=24,
                 fg_color="#1a2030",
@@ -2197,6 +2217,9 @@ class RustPlusHubFeature(Feature):
             "spawn_chinook": alerts.spawn_chinook,
             "spawn_cargo": alerts.spawn_cargo,
             "spawn_vendor": alerts.spawn_vendor,
+            "cargo_arrival": alerts.cargo_arrival,
+            "cargo_docking": alerts.cargo_docking,
+            "cargo_departure": alerts.cargo_departure,
         }
         if category and category in allowed and not allowed[category]:
             return
