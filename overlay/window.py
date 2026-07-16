@@ -33,7 +33,7 @@ class OverlayWindow:
         self._resize_job: Optional[str] = None
         self._nav_buttons: Dict[str, ctk.CTkButton] = {}
         self._feature_frames: Dict[str, ctk.CTkFrame] = {}
-        self._nav_frame: Optional[ctk.CTkScrollableFrame] = None
+        self._nav_frame: Optional[ctk.CTkFrame] = None
         self._content: Optional[ctk.CTkFrame] = None
         self._saved_position = initial_position
         self._on_position_changed = on_position_changed
@@ -106,15 +106,14 @@ class OverlayWindow:
         self._bind_drag_tree(top_bar)
 
         body = ctk.CTkFrame(self.root, fg_color="transparent")
-        body.pack(fill="x")
+        body.pack(fill="both", expand=True)
 
         sidebar = ctk.CTkFrame(body, fg_color="#141a28", width=self.SIDEBAR_WIDTH, corner_radius=0)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        self._nav_frame = ctk.CTkScrollableFrame(
-            sidebar, fg_color="#141a28", width=self.SIDEBAR_WIDTH - 4,
-            height=420, corner_radius=0,
+        self._nav_frame = ctk.CTkFrame(
+            sidebar, fg_color="#141a28", width=self.SIDEBAR_WIDTH - 4, corner_radius=0,
         )
         self._nav_frame.pack(fill="both", expand=True)
 
@@ -126,7 +125,7 @@ class OverlayWindow:
         ).pack(anchor="w", padx=14, pady=(14, 8))
 
         self._content = ctk.CTkFrame(body, fg_color=self.BG_COLOR, corner_radius=0)
-        self._content.pack(side="left", fill="y")
+        self._content.pack(side="left", fill="both", expand=True)
 
     def _mount_features(self) -> None:
         assert self._nav_frame is not None and self._content is not None
@@ -175,6 +174,10 @@ class OverlayWindow:
 
         content_width = self.MIN_WIDTH - self.SIDEBAR_WIDTH
         content_height = self.MIN_HEIGHT - self.TOP_BAR_HEIGHT
+
+        if self._nav_frame is not None:
+            self._nav_frame.update_idletasks()
+            content_height = max(content_height, self._nav_frame.winfo_reqheight())
 
         if self._current_feature_id:
             frame = self._feature_frames[self._current_feature_id]
