@@ -51,7 +51,7 @@ class NotesFeature(Feature):
     def build(self, parent: ctk.CTkFrame) -> None:
         ctk.CTkLabel(
             parent,
-            text="Свободные заметки — как в текстовом документе",
+            text="Свободные заметки",
             font=ctk.CTkFont(size=13),
             text_color="#a0a8b8",
         ).pack(anchor="w", padx=12, pady=(12, 8))
