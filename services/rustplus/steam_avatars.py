@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PIL import Image
 
@@ -18,30 +19,56 @@ class SteamAvatarCache:
         self._dir = cache_dir or (get_rustplus_dir() / "avatars")
         self._dir.mkdir(parents=True, exist_ok=True)
         self._memory: Dict[int, Image.Image] = {}
+        self._loading: set[int] = set()
+        self._pending_callbacks: Dict[int, List[Callable[[int, Image.Image], None]]] = {}
+        self._lock = threading.Lock()
 
     def get(self, steam_id: int) -> Optional[Image.Image]:
         steam_id = int(steam_id)
-        if steam_id in self._memory:
-            return self._memory[steam_id]
+        with self._lock:
+            if steam_id in self._memory:
+                return self._memory[steam_id]
         path = self._dir / f"{steam_id}.jpg"
         if path.exists():
             try:
                 img = Image.open(path).convert("RGBA")
-                self._memory[steam_id] = img
+                with self._lock:
+                    self._memory[steam_id] = img
                 return img
             except Exception:
                 pass
         return None
 
-    def fetch_async(self, steam_id: int, on_ready) -> None:
-        import threading
+    def fetch_async(self, steam_id: int, on_ready: Callable[[int, Image.Image], None]) -> None:
+        steam_id = int(steam_id)
+        cached = self.get(steam_id)
+        if cached is not None:
+            on_ready(steam_id, cached)
+            return
 
-        def worker():
+        with self._lock:
+            if steam_id in self._loading:
+                self._pending_callbacks.setdefault(steam_id, []).append(on_ready)
+                return
+            self._loading.add(steam_id)
+
+        def worker() -> None:
             img = self._download(steam_id)
-            if img:
-                on_ready(steam_id, img)
+            callbacks: List[Callable[[int, Image.Image], None]] = []
+            with self._lock:
+                self._loading.discard(steam_id)
+                if img is not None:
+                    callbacks = [on_ready, *self._pending_callbacks.pop(steam_id, [])]
+                else:
+                    self._pending_callbacks.pop(steam_id, None)
+            if img is not None:
+                for callback in callbacks:
+                    try:
+                        callback(steam_id, img)
+                    except Exception:
+                        pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name=f"SteamAvatar-{steam_id}").start()
 
     def _download(self, steam_id: int) -> Optional[Image.Image]:
         steam_id = int(steam_id)
@@ -49,7 +76,8 @@ class SteamAvatarCache:
         if path.exists():
             try:
                 img = Image.open(path).convert("RGBA")
-                self._memory[steam_id] = img
+                with self._lock:
+                    self._memory[steam_id] = img
                 return img
             except Exception:
                 pass
@@ -70,7 +98,8 @@ class SteamAvatarCache:
                 data = resp.read()
             path.write_bytes(data)
             img = Image.open(path).convert("RGBA")
-            self._memory[steam_id] = img
+            with self._lock:
+                self._memory[steam_id] = img
             return img
         except Exception:
             return None

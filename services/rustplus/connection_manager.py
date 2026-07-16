@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from rustplus import ChatEvent, EntityEvent, RustSocket, ServerDetails, TeamEvent
@@ -59,6 +60,7 @@ class ConnectionManager:
         self._stay_connected = False
         self._reconnect_task: Optional[asyncio.Task] = None
         self._poll_failures = 0
+        self._entity_state_cache: Dict[int, Dict[str, Any]] = {}
         self._POLL_REQUEST_TIMEOUT_SEC = 15.0
         self._MAX_POLL_FAILURES = 3
         self._RECONNECT_DELAYS_SEC = (3, 5, 10, 20, 30, 60)
@@ -201,13 +203,14 @@ class ConnectionManager:
         asyncio.run_coroutine_threadsafe(self._toggle_entity(entity_id, action), self._loop)
 
     def get_entity_info_sync(self, entity_id: int) -> Any:
-        if not self._loop or not self.is_connected:
+        data = self._entity_state_cache.get(int(entity_id))
+        if not data:
             return None
-        future = asyncio.run_coroutine_threadsafe(self._get_entity_info(entity_id), self._loop)
-        try:
-            return future.result(timeout=5)
-        except Exception:
-            return None
+        return SimpleNamespace(**data)
+
+    def _cache_entity_state(self, entity_id: int, **fields: Any) -> None:
+        entry = self._entity_state_cache.setdefault(int(entity_id), {})
+        entry.update(fields)
 
     @property
     def team_cache(self) -> Dict[str, Any]:
@@ -392,6 +395,7 @@ class ConnectionManager:
         self._team_cache = {}
         self._markers_cache = {}
         self._upkeep_warned.clear()
+        self._entity_state_cache.clear()
         self._chat_commands = None
         await self._close_camera()
         if server_id:
@@ -443,6 +447,10 @@ class ConnectionManager:
             for death in self._team_tracker.detect_deaths(payload.get("members", [])):
                 await self._notify_team_death(death)
 
+    def _emit_entity_state(self, entity_id: int, **fields: Any) -> None:
+        self._cache_entity_state(entity_id, **fields)
+        self._bus.emit(EventType.ENTITY_CHANGED, entity_id=entity_id, **fields)
+
     def _register_entity_handlers(
         self, socket: RustSocket, details: ServerDetails, server: PairedServer
     ) -> None:
@@ -455,11 +463,7 @@ class ConnectionManager:
             @EntityEvent(details, entity_id)
             async def on_entity(event, eid=entity_id, dev=device):
                 value = getattr(event, "value", None)
-                self._bus.emit(
-                    EventType.ENTITY_CHANGED,
-                    entity_id=eid,
-                    value=value,
-                )
+                self._emit_entity_state(eid, value=value)
                 if dev.device_type == "smart_alarm" and value:
                     if self._alert_manager.should_emit("alarm"):
                         self._bus.emit(
@@ -490,9 +494,8 @@ class ConnectionManager:
                 info = await self._socket.get_entity_info(device.entity_id)
                 if isinstance(info, RustError):
                     continue
-                self._bus.emit(
-                    EventType.ENTITY_CHANGED,
-                    entity_id=device.entity_id,
+                self._emit_entity_state(
+                    device.entity_id,
                     value=getattr(info, "value", None),
                     capacity=getattr(info, "capacity", None),
                     items=len(getattr(info, "items", []) or []),
@@ -532,10 +535,6 @@ class ConnectionManager:
             self._bus.emit(EventType.STATUS, message="Карта обновлена")
         except Exception as exc:
             self._bus.emit(EventType.ERROR, message=f"Карта: {exc}")
-
-        self._poll_failures = 0
-        if server_id:
-            self._bus.emit(EventType.DISCONNECTED, server_id=server_id)
 
     def _socket_alive(self) -> bool:
         socket = self._socket
