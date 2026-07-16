@@ -235,6 +235,23 @@ class RustPlusService:
         vendors = self.connection.markers_cache.get("vendors", [])
         return ShopTracker().profit_trades(vendors, item_id)
 
+    def list_shop_watch_items(self, server_id: Optional[str] = None) -> list[int]:
+        return self.store.list_shop_watch_items(server_id)
+
+    def add_shop_watch_item(self, item_id: int) -> list[int]:
+        server = self.get_active_server()
+        if not server:
+            self.event_bus.emit(EventType.ERROR, message="Watchlist: нет активного сервера")
+            return []
+        return self.store.add_shop_watch_item(server.id, int(item_id))
+
+    def remove_shop_watch_item(self, item_id: int) -> list[int]:
+        server = self.get_active_server()
+        if not server:
+            self.event_bus.emit(EventType.ERROR, message="Watchlist: нет активного сервера")
+            return []
+        return self.store.remove_shop_watch_item(server.id, int(item_id))
+
     def predict_online(self, steam_id: int) -> Optional[str]:
         server = self.get_active_server()
         if not server:

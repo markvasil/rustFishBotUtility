@@ -93,6 +93,7 @@ class RustPlusHubFeature(Feature):
         self._vendor_kind_var = ctk.StringVar(value="all")
         self._vendors_count_label: Optional[ctk.CTkLabel] = None
         self._vendor_page_label: Optional[ctk.CTkLabel] = None
+        self._vendor_watch_btn: Optional[ctk.CTkButton] = None
         self._vendor_page = 0
         self._vendor_view_mode = "catalog"
         self._vendor_selected_item_id: Optional[int] = None
@@ -441,6 +442,9 @@ class RustPlusHubFeature(Feature):
         self._vendor_prev_btn = btn_secondary(nav_row, "←", self._vendor_prev_page, width=36, height=28)
         self._vendor_back_btn = btn_secondary(
             nav_row, "← Товары", self._show_vendor_catalog, width=88, height=28,
+        )
+        self._vendor_watch_btn = btn_secondary(
+            nav_row, "★ Следить", self._toggle_vendor_watch, width=96, height=28,
         )
         self._vendor_prev_btn.pack(side="left")
         self._vendor_page_label = ctk.CTkLabel(
@@ -1616,6 +1620,7 @@ class RustPlusHubFeature(Feature):
             self._vendor_selected_label.configure(
                 text=icons.item_name(self._vendor_selected_item_id),
             )
+        self._refresh_vendor_watch_button()
         self._refresh_vendors_panel()
 
     def _show_vendor_catalog(self) -> None:
@@ -1627,7 +1632,35 @@ class RustPlusHubFeature(Feature):
             self._vendor_back_btn.pack_forget()
         if self._vendor_selected_label:
             self._vendor_selected_label.configure(text="")
+        if self._vendor_watch_btn:
+            self._vendor_watch_btn.pack_forget()
         self._refresh_vendors_panel()
+
+    def _refresh_vendor_watch_button(self) -> None:
+        if not self._vendor_watch_btn or self._vendor_selected_item_id is None or not self._vendor_prev_btn:
+            return
+        watched = set(self._service.list_shop_watch_items())
+        if self._vendor_selected_item_id in watched:
+            self._vendor_watch_btn.configure(text="☆ Не следить")
+        else:
+            self._vendor_watch_btn.configure(text="★ Следить")
+        self._vendor_watch_btn.pack(side="left", padx=(0, 6), before=self._vendor_prev_btn)
+
+    def _toggle_vendor_watch(self) -> None:
+        if self._vendor_selected_item_id is None:
+            return
+        item_id = int(self._vendor_selected_item_id)
+        watched = set(self._service.list_shop_watch_items())
+        item_name = self._service.item_icons.item_name(item_id)
+        if item_id in watched:
+            self._service.remove_shop_watch_item(item_id)
+            self._set_status(f"Watchlist: удалён {item_name}")
+        else:
+            self._service.add_shop_watch_item(item_id)
+            self._set_status(f"Watchlist: добавлен {item_name}")
+        if self._vendor_selected_label:
+            self._vendor_selected_label.configure(text=item_name)
+        self._refresh_vendor_watch_button()
 
     def _build_vendor_order_row(
         self,

@@ -14,7 +14,7 @@ from services.rustplus.cargo_tracker import CargoTracker
 from services.rustplus.chat_commands import ChatCommandHandler
 from services.rustplus.event_bus import EventBus, EventType
 from services.rustplus.event_tracker import LiveEventTracker, TeamTracker, spawn_category_for_type
-from services.rustplus.live_format import format_markers, format_team, upkeep_hours_left
+from services.rustplus.live_format import format_markers, format_team, resolve_item_name, upkeep_hours_left
 from services.rustplus.player_intel import PlayerIntelDB
 from services.rustplus.shop_tracker import ShopTracker
 from storage.rustplus_store import PairedServer, RustPlusStore
@@ -695,6 +695,10 @@ class ConnectionManager:
                     for alert in self._shop_tracker.detect_changes(
                         payload.get("vendors", []),
                         alerts_enabled=self._alert_manager.should_emit("shop"),
+                        watched_item_ids=set(self._store.list_shop_watch_items(
+                            self._connected_server.id if self._connected_server else None,
+                        )),
+                        item_name_fn=resolve_item_name,
                     ):
                         self._bus.emit(
                             EventType.LIVE_ALERT,
