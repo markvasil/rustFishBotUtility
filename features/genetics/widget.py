@@ -754,13 +754,24 @@ class GeneticsFeature(Feature):
             return
 
         if self._scanner.is_running:
-            self._scanner.stop()
-            if self._scan_preview:
-                self._scan_preview.hide()
             if self._scan_btn:
-                self._scan_btn.configure(text="Сканировать", fg_color="#2d6a4f")
+                self._scan_btn.configure(state="disabled", text="Останавливаем…")
+
+            def on_stopped() -> None:
+                if self._root:
+                    self._root.after(0, _finish_stop)
+
+            def _finish_stop() -> None:
+                if self._scan_preview:
+                    self._scan_preview.hide()
+                if self._scan_btn:
+                    self._scan_btn.configure(state="normal", text="Сканировать", fg_color="#2d6a4f")
+                self.request_resize()
+
+            self._scanner.stop_async(on_stopped)
         else:
             regions, resolution = self._scan_settings()
+            self._set_status("Запуск сканирования…")
             self._scanner.set_profile(resolution)
             self._scanner.start(regions, profile_id=resolution)
             if self._scan_preview:
