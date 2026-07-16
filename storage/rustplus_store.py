@@ -61,6 +61,10 @@ class AlertSettings:
     death: bool = True
     shop: bool = True
     alarm: bool = True
+    spawn_patrol: bool = True
+    spawn_chinook: bool = True
+    spawn_cargo: bool = True
+    spawn_vendor: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -72,6 +76,10 @@ class AlertSettings:
             death=bool(data.get("death", True)),
             shop=bool(data.get("shop", True)),
             alarm=bool(data.get("alarm", True)),
+            spawn_patrol=bool(data.get("spawn_patrol", True)),
+            spawn_chinook=bool(data.get("spawn_chinook", True)),
+            spawn_cargo=bool(data.get("spawn_cargo", True)),
+            spawn_vendor=bool(data.get("spawn_vendor", True)),
         )
 
 
