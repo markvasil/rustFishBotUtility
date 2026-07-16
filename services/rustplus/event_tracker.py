@@ -60,16 +60,19 @@ class TeamTracker:
 
     def __init__(self) -> None:
         self._alive: Dict[int, bool] = {}
+        self._online: Dict[int, bool] = {}
         self._primed = False
 
     def reset(self) -> None:
         self._alive.clear()
+        self._online.clear()
         self._primed = False
 
     def detect_deaths(self, members: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not self._primed:
             for member in members:
                 self._alive[int(member.get("steam_id", 0))] = bool(member.get("is_alive", True))
+                self._online[int(member.get("steam_id", 0))] = bool(member.get("is_online", False))
             self._primed = True
             return []
 
@@ -82,3 +85,23 @@ class TeamTracker:
                 deaths.append(member)
             self._alive[steam_id] = is_alive
         return deaths
+
+    def detect_online_changes(self, members: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._primed:
+            for member in members:
+                self._alive[int(member.get("steam_id", 0))] = bool(member.get("is_alive", True))
+                self._online[int(member.get("steam_id", 0))] = bool(member.get("is_online", False))
+            self._primed = True
+            return []
+
+        changes: List[Dict[str, Any]] = []
+        for member in members:
+            steam_id = int(member.get("steam_id", 0))
+            was_online = self._online.get(steam_id, False)
+            is_online = bool(member.get("is_online", False))
+            if was_online != is_online:
+                updated = dict(member)
+                updated["became_online"] = is_online
+                changes.append(updated)
+            self._online[steam_id] = is_online
+        return changes

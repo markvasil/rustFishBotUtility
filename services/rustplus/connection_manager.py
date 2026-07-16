@@ -672,6 +672,8 @@ class ConnectionManager:
                         self._player_intel.record_team(self._connected_server.id, payload.get("members", []))
                     for death in self._team_tracker.detect_deaths(payload.get("members", [])):
                         await self._notify_team_death(death)
+                    for member in self._team_tracker.detect_online_changes(payload.get("members", [])):
+                        await self._notify_team_online_change(member)
 
                 markers = await self._poll_request(self._socket.get_markers())
                 if isinstance(markers, RustError):
@@ -780,6 +782,22 @@ class ConnectionManager:
             await self._socket.send_team_message(message)
         except Exception:
             pass
+
+    async def _notify_team_online_change(self, member: Dict[str, Any]) -> None:
+        if not self._alert_manager.should_emit("team_online"):
+            return
+        name = str(member.get("name", "Игрок"))
+        grid = str(member.get("grid", "?"))
+        became_online = bool(member.get("became_online"))
+        state = "онлайн" if became_online else "оффлайн"
+        icon = "🟢" if became_online else "⚫"
+        message = f"{icon} {name} {state} [{grid}]"
+        self._bus.emit(
+            EventType.LIVE_ALERT,
+            title="Team Online",
+            message=message,
+            category="team_online",
+        )
 
     async def _promote_team_leader(self, steam_id: int, member_name: str) -> None:
         if not self._socket or not self._connected_server:
