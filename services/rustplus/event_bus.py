@@ -46,11 +46,18 @@ class EventBus:
 
     def poll(self) -> list[RustPlusEvent]:
         events: list[RustPlusEvent] = []
+        latest_camera: Optional[RustPlusEvent] = None
         while True:
             try:
-                events.append(self._queue.get_nowait())
+                event = self._queue.get_nowait()
             except queue.Empty:
                 break
+            if event.type == EventType.CAMERA_FRAME:
+                latest_camera = event
+            else:
+                events.append(event)
+        if latest_camera is not None:
+            events.append(latest_camera)
         return events
 
     def dispatch(self, event: RustPlusEvent) -> None:

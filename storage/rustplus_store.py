@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -328,17 +329,19 @@ class RustPlusStore:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or get_rustplus_data_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self._data: Dict[str, Any] = {}
         self.load()
 
     def load(self) -> None:
-        if self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+        with self._lock:
+            if self._path.exists():
+                try:
+                    self._data = json.loads(self._path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    self._data = {}
+            else:
                 self._data = {}
-        else:
-            self._data = {}
         self._migrate_device_types()
         self.migrate_device_hotkeys()
 
@@ -358,13 +361,14 @@ class RustPlusStore:
             self.save()
 
     def save(self) -> None:
-        try:
-            self._path.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        with self._lock:
+            payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+            tmp = self._path.with_suffix(".json.tmp")
+            try:
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(self._path)
+            except OSError:
+                pass
 
     def has_fcm_config(self) -> bool:
         return get_fcm_config_path().exists()
