@@ -65,9 +65,9 @@ class ConnectionManager:
         self._POLL_REQUEST_TIMEOUT_SEC = 15.0
         self._MAX_POLL_FAILURES = 3
         self._RECONNECT_DELAYS_SEC = (3, 5, 10, 20, 30, 60)
-        self._POLL_INTERVAL_MIN_SEC = 5
-        self._POLL_INTERVAL_MAX_SEC = 20
-        self._POLL_INTERVAL_DEFAULT_SEC = 10
+        self._POLL_INTERVAL_MIN_SEC = 1
+        self._POLL_INTERVAL_MAX_SEC = 10
+        self._POLL_INTERVAL_DEFAULT_SEC = 5
 
     @property
     def is_connected(self) -> bool:
@@ -142,7 +142,15 @@ class ConnectionManager:
         if not self._loop or not self.is_connected:
             self._bus.emit(EventType.ERROR, message="Карта: сначала подключитесь к серверу")
             return
-        asyncio.run_coroutine_threadsafe(self._fetch_map(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._fetch_map(), self._loop)
+
+        def _report(done) -> None:
+            try:
+                done.result()
+            except Exception as exc:
+                self._bus.emit(EventType.ERROR, message=f"Карта: {exc}")
+
+        future.add_done_callback(_report)
 
     def refresh_devices(self) -> None:
         if not self._loop or not self.is_connected or not self._socket or not self._connected_server:
@@ -441,6 +449,12 @@ class ConnectionManager:
         @TeamEvent(details)
         async def on_team(event):
             payload = format_team(event, self._map_size)
+            payload["members"] = add_motion_vectors(
+                payload.get("members", []),
+                self._team_cache.get("members", []),
+                key_name="steam_id",
+                map_size=self._map_size,
+            )
             self._team_cache = payload
             self._bus.emit(EventType.TEAM_INFO, **payload)
             if self._connected_server:
@@ -513,21 +527,36 @@ class ConnectionManager:
             return
         try:
             from app_paths import get_rustplus_dir
+            from services.rustplus.monument_icons import (
+                build_small_monument_overrides,
+                patch_rustplus_metro_resize,
+            )
+
+            from services.rustplus.grid_coords import generate_grid_overlay
 
             self._bus.emit(EventType.STATUS, message="Загрузка карты...")
             layers = self._store.get_map_layers()
-            # События (cargo/heli/chinook) не запекаем в JPEG — их рисует live-оверлей,
-            # иначе на карте остаётся «застывшая» позиция с момента загрузки.
-            map_image = await self._socket.get_map(
-                add_icons=layers.monuments,
-                add_events=False,
-                add_vending_machines=layers.shops,
-                add_team_positions=layers.players,
-                add_grid=True,
-            )
+            # Игроков и события не запекаем в JPEG — их рисует live-оверлей.
+            # Монументы уменьшаем через override_images (без второго get_map_info).
+            # Сетку рисуем сами (формула как в игре), add_grid rustplus даёт чужие AA-метки.
+            override_images = build_small_monument_overrides() if layers.monuments else {}
+            with patch_rustplus_metro_resize():
+                map_image = await self._socket.get_map(
+                    add_icons=bool(layers.monuments),
+                    add_events=False,
+                    add_vending_machines=layers.shops,
+                    add_team_positions=False,
+                    add_grid=False,
+                    override_images=override_images,
+                )
             if isinstance(map_image, RustError):
                 self._bus.emit(EventType.ERROR, message=f"Карта: {map_image.reason}")
                 return
+
+            grid = generate_grid_overlay(map_image.size[0])
+            if map_image.mode != "RGBA":
+                map_image = map_image.convert("RGBA")
+            map_image.paste(grid, (0, 0), grid)
 
             path = get_rustplus_dir() / "map_live.jpg"
             if map_image.mode != "RGB":
@@ -666,6 +695,7 @@ class ConnectionManager:
                         payload.get("members", []),
                         self._team_cache.get("members", []),
                         key_name="steam_id",
+                        map_size=self._map_size,
                     )
                     self._team_cache = payload
                     self._bus.emit(EventType.TEAM_INFO, **payload)
@@ -686,11 +716,13 @@ class ConnectionManager:
                         payload.get("events", []),
                         self._markers_cache.get("events", []),
                         key_name="id",
+                        map_size=self._map_size,
                     )
                     payload["vendors"] = add_motion_vectors(
                         payload.get("vendors", []),
                         self._markers_cache.get("vendors", []),
                         key_name="id",
+                        map_size=self._map_size,
                     )
                     self._markers_cache = payload
                     self._bus.emit(EventType.MARKERS, **payload)
@@ -770,6 +802,9 @@ class ConnectionManager:
         message = f"💀 {name} погиб [{grid}]"
         if self._connected_server:
             self._store.add_death_marker(self._connected_server.id, death)
+            # TEAM_INFO уже ушёл до записи метки — пушим ещё раз, чтобы крест появился на карте.
+            if self._store.get_alert_settings().death:
+                self._bus.emit(EventType.TEAM_INFO, **dict(self._team_cache))
         if self._alert_manager.should_emit("death"):
             self._bus.emit(
                 EventType.LIVE_ALERT,
@@ -838,6 +873,12 @@ class ConnectionManager:
             return
 
         payload = format_team(refreshed, self._map_size)
+        payload["members"] = add_motion_vectors(
+            payload.get("members", []),
+            self._team_cache.get("members", []),
+            key_name="steam_id",
+            map_size=self._map_size,
+        )
         self._team_cache = payload
         self._bus.emit(EventType.TEAM_INFO, **payload)
         if int(payload.get("leader_steam_id") or 0) == int(steam_id):
