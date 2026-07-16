@@ -128,7 +128,7 @@ class AppSettings:
     crosshair_image_path: str = ""
     crosshair_presets: List[Dict[str, Any]] = field(default_factory=list)
     tracked_event_id: Optional[int] = None
-    poll_interval_sec: int = 10
+    poll_interval_sec: int = 5
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -160,7 +160,7 @@ class AppSettings:
                 if isinstance(item, dict)
             ],
             tracked_event_id=int(data["tracked_event_id"]) if data.get("tracked_event_id") else None,
-            poll_interval_sec=max(5, min(20, int(data.get("poll_interval_sec", 10)))),
+            poll_interval_sec=max(1, min(10, int(data.get("poll_interval_sec", 5)))),
         )
 
 
@@ -325,6 +325,9 @@ class PairedDevice:
 
 class RustPlusStore:
     """Хранилище паринга серверов, устройств и активного подключения."""
+
+    DEATH_MARKER_MAX = 3
+    DEATH_MARKER_TTL_SEC = 5 * 60
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or get_rustplus_data_path()
@@ -800,10 +803,34 @@ class RustPlusStore:
         self.save()
 
     def list_death_markers(self, server_id: Optional[str] = None) -> List[DeathMarker]:
+        self.prune_death_markers()
         markers = [DeathMarker.from_dict(item) for item in self._data.get("death_markers", [])]
         if server_id:
             return [m for m in markers if m.server_id == server_id]
         return markers
+
+    def prune_death_markers(self) -> bool:
+        """Удаляет метки старше TTL. True, если что-то изменилось."""
+        now = int(time.time())
+        markers = [DeathMarker.from_dict(item) for item in self._data.get("death_markers", [])]
+        kept = [m for m in markers if (now - int(m.ts)) < self.DEATH_MARKER_TTL_SEC]
+        if len(kept) == len(markers):
+            return False
+        self._data["death_markers"] = [m.to_dict() for m in kept]
+        self.save()
+        return True
+
+    def next_death_marker_expiry_sec(self, server_id: Optional[str] = None) -> Optional[float]:
+        """Секунды до ближайшего истечения метки, либо None."""
+        markers = self.list_death_markers(server_id)
+        if not markers:
+            return None
+        now = time.time()
+        remaining = [self.DEATH_MARKER_TTL_SEC - (now - float(m.ts)) for m in markers]
+        positive = [r for r in remaining if r > 0]
+        if not positive:
+            return 0.0
+        return min(positive)
 
     def add_death_marker(self, server_id: str, member: Dict[str, Any]) -> DeathMarker:
         marker = DeathMarker(
@@ -815,15 +842,20 @@ class RustPlusStore:
             grid=str(member.get("grid", "?")),
             ts=int(time.time()),
         )
-        markers = self.list_death_markers()
+        self.prune_death_markers()
+        markers = [DeathMarker.from_dict(item) for item in self._data.get("death_markers", [])]
         markers.insert(0, marker)
-        self._data["death_markers"] = [m.to_dict() for m in markers[:40]]
+        self._data["death_markers"] = [m.to_dict() for m in markers[: self.DEATH_MARKER_MAX]]
         self.save()
         return marker
 
     def clear_death_markers(self, server_id: Optional[str] = None) -> None:
         if server_id:
-            markers = [m for m in self.list_death_markers() if m.server_id != server_id]
+            markers = [
+                m
+                for m in (DeathMarker.from_dict(item) for item in self._data.get("death_markers", []))
+                if m.server_id != server_id
+            ]
         else:
             markers = []
         self._data["death_markers"] = [m.to_dict() for m in markers]
