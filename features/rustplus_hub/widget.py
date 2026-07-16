@@ -102,6 +102,7 @@ class RustPlusHubFeature(Feature):
         self._vendor_offers_cache: List[Dict[str, Any]] = []
         self._vendors_render_job: Optional[str] = None
         self._map_sync_job: Optional[str] = None
+        self._event_dock_job: Optional[str] = None
         self._vendors_signature: Optional[str] = None
         self._map_overlay_signature: Optional[str] = None
         self._map_preview: Optional[ctk.CTkLabel] = None
@@ -369,6 +370,7 @@ class RustPlusHubFeature(Feature):
         self._refresh_cameras_panel()
         self._refresh_fcm_warning()
         self._refresh_groups_label()
+        self._start_event_dock_refresh()
         if self._service.connection.is_connected:
             self._service.refresh_device_states()
 
@@ -1454,6 +1456,7 @@ class RustPlusHubFeature(Feature):
     def _track_event(self, event_id: Optional[int]) -> None:
         self._service.store.set_tracked_event_id(event_id)
         self._map_overlay_signature = None
+        self._refresh_events_panel(self._events_cache)
         self._schedule_map_overlay_sync()
         if event_id:
             self._set_status(f"Трекинг события #{event_id} на карте")
@@ -1500,28 +1503,93 @@ class RustPlusHubFeature(Feature):
                 anchor="w", padx=8, pady=8,
             )
             return
-        for event in events[:10]:
+        tracked_event_id = self._service.store.get_tracked_event_id()
+        for event in events[:8]:
             eid = event.get("id")
             cargo_status = event.get("cargo_status") or {}
-            status_suffix = ""
-            if cargo_status:
-                remaining = cargo_status.get("remaining_minutes")
-                if cargo_status.get("in_harbor") and remaining is not None:
-                    status_suffix = f" | порт {remaining} мин"
-                elif cargo_status.get("route"):
-                    status_suffix = f" | route {' → '.join(cargo_status.get('route', [])[-3:])}"
-            btn = ctk.CTkButton(
+            is_tracked = eid is not None and int(eid) == int(tracked_event_id or 0)
+            card = ctk.CTkFrame(
                 self._events_frame,
-                text=f"{event.get('type_name', '?')} — {event.get('grid', '?')}{status_suffix} → трек",
-                anchor="w",
-                height=24,
-                fg_color="#1a2030",
-                hover_color="#2a3142",
-                font=ctk.CTkFont(size=11),
-                command=lambda eid=eid: self._track_event(int(eid) if eid is not None else None),
+                fg_color="#20293b" if is_tracked else "#1a2030",
+                corner_radius=8,
             )
-            btn.pack(fill="x", padx=8, pady=2)
+            card.pack(fill="x", padx=8, pady=3)
+
+            head = ctk.CTkFrame(card, fg_color="transparent")
+            head.pack(fill="x", padx=8, pady=(6, 2))
+            ctk.CTkLabel(
+                head,
+                text=f"{event.get('type_name', '?')} [{event.get('grid', '?')}]",
+                anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=Theme.TEXT,
+            ).pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                head,
+                text="TRACK" if is_tracked else "TRACK",
+                font=ctk.CTkFont(size=9, weight="bold"),
+                text_color=Theme.INFO if is_tracked else Theme.MUTED,
+            ).pack(side="right")
+
+            badges = self._event_dock_badges(event)
+            if badges:
+                meta = ctk.CTkFrame(card, fg_color="transparent")
+                meta.pack(fill="x", padx=8, pady=(0, 2))
+                for text, color in badges:
+                    ctk.CTkLabel(
+                        meta,
+                        text=text,
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        text_color=color,
+                        fg_color=Theme.CARD_ALT,
+                        corner_radius=6,
+                        padx=6,
+                        pady=2,
+                    ).pack(side="left", padx=(0, 4))
+
+            ctk.CTkButton(
+                card,
+                text="Трек на карте",
+                height=26,
+                fg_color="#243149",
+                hover_color="#2d3b55",
+                font=ctk.CTkFont(size=10),
+                command=lambda eid=eid: self._track_event(int(eid) if eid is not None else None),
+            ).pack(anchor="e", padx=8, pady=(2, 6))
         self.request_resize()
+
+    def _event_dock_badges(self, event: Dict[str, Any]) -> List[tuple[str, str]]:
+        badges: List[tuple[str, str]] = []
+        cargo_status = event.get("cargo_status") or {}
+        if cargo_status:
+            remaining = cargo_status.get("remaining_minutes")
+            if cargo_status.get("in_harbor") and remaining is not None:
+                badges.append((f"порт {remaining} мин", Theme.WARN))
+            route = cargo_status.get("route") or []
+            if route:
+                badges.append((f"route {' -> '.join(route[-2:])}", Theme.INFO))
+        event_name = str(event.get("type_name", "")).lower()
+        if "chinook" in event_name:
+            badges.append(("air", Theme.INFO))
+        elif "верт" in event_name:
+            badges.append(("heli", Theme.WARN))
+        elif "карго" in event_name:
+            badges.append(("sea", Theme.SUCCESS))
+        elif "торгов" in event_name:
+            badges.append(("vendor", Theme.MUTED))
+        return badges
+
+    def _start_event_dock_refresh(self) -> None:
+        if self._event_dock_job:
+            return
+
+        def tick():
+            self._event_dock_job = None
+            if self._events_cache:
+                self._refresh_events_panel(self._events_cache)
+            self._start_event_dock_refresh()
+
+        self._event_dock_job = self._root.after(1000, tick)
 
     def _refresh_vendors_panel(self) -> None:
         if not self._vendors_frame:
@@ -2274,6 +2342,9 @@ class RustPlusHubFeature(Feature):
         if self._poll_job:
             self._root.after_cancel(self._poll_job)
             self._poll_job = None
+        if self._event_dock_job:
+            self._root.after_cancel(self._event_dock_job)
+            self._event_dock_job = None
 
     def on_shutdown(self) -> None:
         self.on_hide()
