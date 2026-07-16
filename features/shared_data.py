@@ -62,12 +62,14 @@ GENE_WEIGHTS = {"G": 0.6, "Y": 0.6, "H": 0.6, "W": 1.0, "X": 1.0}
 VALID_GENES = set("GYHWX")
 
 ELECTRICITY_SOURCES = {
+    # Facepunch Wiki / RustHelp: max output
     "solar": ("Солнечная панель", 20),
-    "wind": ("Ветряк", 100),
-    "generator": ("Генератор", 100),
+    "wind": ("Ветряк", 150),
+    "generator": ("Генератор", 40),
 }
 
 ELECTRICITY_CONSUMERS = {
+    # Значения IO Consumption: Facepunch Wiki + RustHelp (дампы игры)
     "turret": ("Автоматическая турель", 10),
     "sam": ("Зенитная установка", 25),
     "heater": ("Электрообогреватель", 3),
@@ -77,18 +79,20 @@ ELECTRICITY_CONSUMERS = {
     "flasher": ("Мигающий свет", 1),
     "siren_light": ("Сигнальный свет", 1),
     "search_light": ("Прожектор", 10),
-    "neon_sign": ("Неоновая вывеска", 1),
+    "neon_sign_large": ("Неоновая вывеска (большая)", 6),
+    "neon_sign_medium": ("Неоновая вывеска (средняя)", 4),
+    "neon_sign_small": ("Неоновая вывеска (малая)", 2),
     "string_lights": ("Гирлянда", 1),
     "audio_alarm": ("Звуковая сигнализация", 1),
     "smart_alarm": ("Умная сигнализация", 1),
-    "cctv": ("CCTV камера", 5),
+    "cctv": ("CCTV камера", 3),
     "ptz_cctv": ("PTZ камера", 3),
     "door_controller": ("Контроллер двери", 1),
     "igniter": ("Воспламенитель", 2),
     "storage_monitor": ("Монитор хранилища", 1),
     "elevator": ("Лифт", 5),
     "car_lift": ("Автоподъёмник", 5),
-    "tesla": ("Катушка Теслы", 34),
+    "tesla": ("Катушка Теслы", 25),
     "water_pump": ("Водяной насос", 5),
     "water_purifier": ("Очиститель воды", 5),
     "fluid_switch": ("Жидкостный насос", 1),
@@ -99,15 +103,16 @@ ELECTRICITY_CONSUMERS = {
     "pressure_pad": ("Нажимная плита", 1),
     "sprinkler": ("Разбрызгиватель", 1),
     "vending_machine": ("Торговый автомат", 5),
-    "boombox": ("Бумбокс", 1),
-    "mini_fridge": ("Мини-холодильник", 2),
+    "boombox": ("Бумбокс", 10),
+    "mini_fridge": ("Холодильник", 5),
     "telephone": ("Телефон", 1),
     "rf_broadcaster": ("RF передатчик", 1),
     "rf_receiver": ("RF приёмник", 1),
-    "weapon_rack_light": ("Подсветка стойки оружия", 1),
+    "sound_light": ("Светомузыка", 1),
 }
 
 BATTERY_CAPACITY = {
+    # Facepunch Wiki: Power Capacity (rWm)
     "medium": ("Средний аккумулятор", 9000),
     "large": ("Большой аккумулятор", 24000),
 }
