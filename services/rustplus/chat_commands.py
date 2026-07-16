@@ -16,6 +16,7 @@ class ChatCommandHandler:
         store: RustPlusStore,
         *,
         send_message: Callable[[str], None],
+        promote_team_leader: Callable[[int, str], None],
         set_entity: Callable[[int, bool], None],
         get_entity_info: Callable[[int], Any],
         get_server_time_raw: Callable[[], Optional[float]],
@@ -24,6 +25,7 @@ class ChatCommandHandler:
     ) -> None:
         self._store = store
         self._send = send_message
+        self._promote_team_leader = promote_team_leader
         self._set_entity = set_entity
         self._get_entity_info = get_entity_info
         self._get_server_time_raw = get_server_time_raw
@@ -54,7 +56,7 @@ class ChatCommandHandler:
             "on": lambda: self._switch_command(True, arg),
             "off": lambda: self._switch_command(False, arg),
             "toggle": lambda: self._toggle_command(arg),
-            "leader": self._leader_command,
+            "leader": lambda: self._leader_command(name, steam_id),
             "upkeep": self._upkeep_command,
             "mark": lambda: self._mark_command(name, arg, steam_id),
             "share": self._share_devices_command,
@@ -106,7 +108,7 @@ class ChatCommandHandler:
         names = ", ".join(d.name for d in devices[:3])
         self._send(f"Switch toggle: {names}")
 
-    def _leader_command(self) -> None:
+    def _leader_command(self, author: str, steam_id: Optional[int]) -> None:
         team = self._get_team()
         leader_id = team.get("leader_steam_id")
         members = team.get("members", [])
@@ -114,9 +116,23 @@ class ChatCommandHandler:
         if not leader:
             self._send("!leader: лидер не найден")
             return
-        grid = leader.get("grid", "?")
-        online = "онлайн" if leader.get("is_online") else "оффлайн"
-        self._send(f"Лидер: {leader.get('name', '?')} [{grid}] — {online}")
+        member = None
+        if steam_id:
+            member = next((m for m in members if m.get("steam_id") == steam_id), None)
+        if not member:
+            member = next((m for m in members if m.get("name") == author), None)
+        if not member:
+            self._send("!leader: отправитель не найден в команде")
+            return
+        if int(member.get("steam_id", 0)) == int(leader_id or 0):
+            grid = member.get("grid", "?")
+            self._send(f"!leader: {member.get('name', '?')} уже лидер [{grid}]")
+            return
+        target_steam_id = int(member.get("steam_id", 0))
+        if not target_steam_id:
+            self._send("!leader: не удалось определить Steam ID")
+            return
+        self._promote_team_leader(target_steam_id, str(member.get("name", author) or author))
 
     def _upkeep_command(self) -> None:
         server_id = self._active_server_id()
