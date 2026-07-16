@@ -585,6 +585,10 @@ class RustPlusHubFeature(Feature):
             "death": ctk.BooleanVar(value=alerts.death),
             "shop": ctk.BooleanVar(value=alerts.shop),
             "alarm": ctk.BooleanVar(value=alerts.alarm),
+            "spawn_patrol": ctk.BooleanVar(value=alerts.spawn_patrol),
+            "spawn_chinook": ctk.BooleanVar(value=alerts.spawn_chinook),
+            "spawn_cargo": ctk.BooleanVar(value=alerts.spawn_cargo),
+            "spawn_vendor": ctk.BooleanVar(value=alerts.spawn_vendor),
         }
         alerts_body = settings_group(
             parent,
@@ -596,9 +600,17 @@ class RustPlusHubFeature(Feature):
             "death": "Смерти тиммейтов + маркеры на карте",
             "shop": "Алерты о выгодных сделках и изменениях шопов",
             "alarm": "Smart Alarm (FCM и в игре)",
+            "spawn_patrol": "Team chat: спавн патрульного вертолёта",
+            "spawn_chinook": "Team chat: спавн Chinook",
+            "spawn_cargo": "Team chat: появление Cargo Ship",
+            "spawn_vendor": "Team chat: появление бродячего торговца",
         }
         for key, label in [
             ("cargo", "Карго"), ("death", "Смерть"), ("shop", "Магазины"), ("alarm", "Alarm"),
+            ("spawn_patrol", "Spawn: Верт"),
+            ("spawn_chinook", "Spawn: Chinook"),
+            ("spawn_cargo", "Spawn: Cargo"),
+            ("spawn_vendor", "Spawn: Vendor"),
         ]:
             row = ctk.CTkFrame(alerts_body, fg_color="transparent")
             row.pack(fill="x", pady=2)
@@ -858,6 +870,10 @@ class RustPlusHubFeature(Feature):
             death=self._alert_vars["death"].get(),
             shop=self._alert_vars["shop"].get(),
             alarm=self._alert_vars["alarm"].get(),
+            spawn_patrol=self._alert_vars["spawn_patrol"].get(),
+            spawn_chinook=self._alert_vars["spawn_chinook"].get(),
+            spawn_cargo=self._alert_vars["spawn_cargo"].get(),
+            spawn_vendor=self._alert_vars["spawn_vendor"].get(),
         )
         self._service.update_alert_settings(alerts)
         self._map_overlay_signature = None
@@ -2141,6 +2157,10 @@ class RustPlusHubFeature(Feature):
             "death": alerts.death,
             "shop": alerts.shop,
             "alarm": alerts.alarm,
+            "spawn_patrol": alerts.spawn_patrol,
+            "spawn_chinook": alerts.spawn_chinook,
+            "spawn_cargo": alerts.spawn_cargo,
+            "spawn_vendor": alerts.spawn_vendor,
         }
         if category and category in allowed and not allowed[category]:
             return

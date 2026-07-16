@@ -13,7 +13,7 @@ from services.rustplus.alert_manager import AlertManager
 from services.rustplus.cargo_tracker import CargoTracker
 from services.rustplus.chat_commands import ChatCommandHandler
 from services.rustplus.event_bus import EventBus, EventType
-from services.rustplus.event_tracker import LiveEventTracker, TeamTracker
+from services.rustplus.event_tracker import LiveEventTracker, TeamTracker, spawn_category_for_type
 from services.rustplus.live_format import format_markers, format_team, upkeep_hours_left
 from services.rustplus.player_intel import PlayerIntelDB
 from services.rustplus.shop_tracker import ShopTracker
@@ -661,6 +661,11 @@ class ConnectionManager:
                                 message=f"{event.get('type_name', 'Событие')} — {event.get('grid', '?')}",
                                 category=category,
                             )
+                            if self._socket:
+                                try:
+                                    await self._socket.send_team_message(self._spawn_chat_message(event))
+                                except Exception:
+                                    pass
                     cargo_msg = self._cargo_tracker.update(payload.get("events", []))
                     if cargo_msg and self._alert_manager.should_emit("cargo"):
                         self._bus.emit(
@@ -768,12 +773,13 @@ class ConnectionManager:
 
     @staticmethod
     def _event_category(event: Dict[str, Any]) -> str:
-        from rustplus.structs.rust_marker import RustMarker
+        return spawn_category_for_type(event.get("type"))
 
-        marker_type = event.get("type")
-        if marker_type == RustMarker.CargoShipMarker:
-            return "cargo"
-        return "cargo"
+    @staticmethod
+    def _spawn_chat_message(event: Dict[str, Any]) -> str:
+        title = str(event.get("type_name", "Событие"))
+        grid = str(event.get("grid", "?"))
+        return f"📡 {title} появился [{grid}]"
 
     async def _open_camera(self, camera_id: str) -> None:
         cam_id = camera_id.strip()

@@ -27,6 +27,10 @@ class AlertManager:
             "shop": s.shop,
             "alarm": s.alarm,
             "event": s.cargo,
+            "spawn_patrol": s.spawn_patrol,
+            "spawn_chinook": s.spawn_chinook,
+            "spawn_cargo": s.spawn_cargo,
+            "spawn_vendor": s.spawn_vendor,
         }
         return mapping.get(category, True)
 

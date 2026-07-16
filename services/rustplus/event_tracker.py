@@ -11,6 +11,17 @@ ALERT_MARKER_TYPES = {
     RustMarker.TravelingVendor,
 }
 
+SPAWN_CATEGORY_BY_TYPE = {
+    RustMarker.PatrolHelicopterMarker: "spawn_patrol",
+    RustMarker.ChinookMarker: "spawn_chinook",
+    RustMarker.CargoShipMarker: "spawn_cargo",
+    RustMarker.TravelingVendor: "spawn_vendor",
+}
+
+
+def spawn_category_for_type(marker_type: Any) -> str:
+    return SPAWN_CATEGORY_BY_TYPE.get(marker_type, "spawn_event")
+
 
 class LiveEventTracker:
     """Отслеживает появление новых событий на карте (карго, верт, chinook)."""
