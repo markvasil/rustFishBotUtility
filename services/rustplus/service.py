@@ -39,10 +39,12 @@ class RustPlusService:
             steam_id = member.get("steam_id")
             if not steam_id:
                 continue
-            self.avatars.fetch_async(
-                int(steam_id),
-                lambda sid, img: self.map_renderer.set_avatar(sid, img),
-            )
+            sid = int(steam_id)
+
+            def on_ready(ready_sid: int, img) -> None:
+                self.map_renderer.set_avatar(ready_sid, img)
+
+            self.avatars.fetch_async(sid, on_ready)
 
     def _on_server_paired(self, event) -> None:
         ip = str(event.payload["ip"])
@@ -112,6 +114,7 @@ class RustPlusService:
     def start(self) -> None:
         self.connection.start()
         self.reload_device_hotkeys()
+        self.item_icons.refresh_catalog_async()
         if self.store.has_fcm_config() and self.fcm.runtime_ready():
             self.fcm.start_listen()
 

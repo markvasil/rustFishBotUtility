@@ -36,7 +36,24 @@ class ItemIconCache:
         self._shortnames: Dict[int, str] = {}
         self._loading: set[int] = set()
         self._slug_lock = threading.Lock()
-        self._load_catalog()
+        self._catalog_refreshing = False
+        self._load_local_catalog()
+
+    def refresh_catalog_async(self) -> None:
+        if getattr(self, "_catalog_refreshing", False):
+            return
+        self._catalog_refreshing = True
+
+        def worker() -> None:
+            try:
+                self._merge_items_md()
+                self._ensure_extended_catalog(force=False)
+                self._merge_rustplus_names()
+                self._persist_slugs()
+            finally:
+                self._catalog_refreshing = False
+
+        threading.Thread(target=worker, daemon=True, name="ItemIconCatalog").start()
 
     def item_name(self, item_id: int) -> str:
         item_id = int(item_id)
@@ -159,14 +176,20 @@ class ItemIconCache:
             self._slugs[item_id] = slug
             self._persist_slugs()
 
-    def _load_catalog(self) -> None:
+    def _load_local_catalog(self) -> None:
         if self._slug_path.exists():
             try:
                 raw = json.loads(self._slug_path.read_text(encoding="utf-8"))
                 self._slugs = {int(k): str(v) for k, v in raw.items()}
             except Exception:
                 self._slugs = {}
+        cached = self._read_extended_items()
+        if cached:
+            self._merge_extended_items(cached)
+        self._merge_rustplus_names()
 
+    def _load_catalog(self) -> None:
+        self._load_local_catalog()
         self._merge_items_md()
         self._ensure_extended_catalog(force=False)
         self._merge_rustplus_names()
