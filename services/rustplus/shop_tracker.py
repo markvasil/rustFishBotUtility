@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from services.rustplus.live_format import resolve_item_name
+
 
 class ShopTracker:
     """Алерты магазинов и простая аналитика сделок."""
@@ -124,32 +126,80 @@ class ShopTracker:
         self._primed = True
 
     def profit_trades(self, vendors: List[Dict[str, Any]], item_id: int) -> List[Dict[str, Any]]:
-        buys: List[Tuple[int, str, Dict[str, Any]]] = []
-        sells: List[Tuple[int, str, Dict[str, Any]]] = []
+        start_item = int(item_id)
+        edges: Dict[int, List[Dict[str, Any]]] = {}
 
         for vendor in vendors:
-            grid = vendor.get("grid", "?")
             for order in vendor.get("sell_orders", []):
-                if int(order.get("item_id", -1)) != int(item_id):
-                    continue
+                source = int(order.get("currency_id", 0))
+                target = int(order.get("item_id", 0))
                 cost = int(order.get("cost_per_item", 0))
-                currency = int(order.get("currency_id", 0))
-                entry = {"vendor": vendor.get("name"), "grid": grid, "order": order}
-                sells.append((cost, grid, entry))
-                if currency == item_id:
-                    buys.append((cost, grid, entry))
+                qty = int(order.get("quantity", 0))
+                stock = int(order.get("amount_in_stock", 0))
+                if source == 0 or target == 0 or cost <= 0 or qty <= 0 or stock <= 0:
+                    continue
+                edge = {
+                    "source": source,
+                    "target": target,
+                    "cost": cost,
+                    "qty": qty,
+                    "rate": qty / cost,
+                    "vendor": vendor,
+                    "order": order,
+                }
+                edges.setdefault(source, []).append(edge)
 
         results: List[Dict[str, Any]] = []
-        for buy_cost, buy_grid, buy_entry in sorted(buys, key=lambda x: x[0]):
-            for sell_cost, sell_grid, sell_entry in sorted(sells, key=lambda x: -x[0]):
-                if sell_cost > buy_cost:
+        seen_routes: Set[Tuple[int, ...]] = set()
+
+        def route_text(path: List[Dict[str, Any]]) -> str:
+            segments: List[str] = []
+            for edge in path:
+                vendor = edge["vendor"]
+                segments.append(
+                    f"{resolve_item_name(edge['source'])} -> {resolve_item_name(edge['target'])} "
+                    f"[{vendor.get('grid', '?')}]"
+                )
+            return " | ".join(segments)
+
+        def dfs(current_item: int, amount: float, path: List[Dict[str, Any]], visited: Set[int], depth: int) -> None:
+            if depth == 0:
+                return
+            for edge in edges.get(current_item, []):
+                nxt = int(edge["target"])
+                new_amount = amount * float(edge["rate"])
+                new_path = path + [edge]
+                if nxt == start_item and len(new_path) >= 2 and new_amount > 1.0:
+                    signature = tuple(int(step["vendor"].get("id", 0)) for step in new_path)
+                    if signature in seen_routes:
+                        continue
+                    seen_routes.add(signature)
                     results.append(
                         {
-                            "item_id": item_id,
-                            "profit": sell_cost - buy_cost,
-                            "buy": buy_entry,
-                            "sell": sell_entry,
-                            "route": f"Купить [{buy_grid}] → Продать [{sell_grid}]",
+                            "item_id": start_item,
+                            "profit": round(new_amount - 1.0, 3),
+                            "profit_percent": round((new_amount - 1.0) * 100.0, 1),
+                            "final_amount": round(new_amount, 3),
+                            "hops": len(new_path),
+                            "path": new_path,
+                            "buy": {
+                                "vendor": new_path[0]["vendor"].get("name"),
+                                "grid": new_path[0]["vendor"].get("grid", "?"),
+                                "order": new_path[0]["order"],
+                            },
+                            "sell": {
+                                "vendor": new_path[-1]["vendor"].get("name"),
+                                "grid": new_path[-1]["vendor"].get("grid", "?"),
+                                "order": new_path[-1]["order"],
+                            },
+                            "route": route_text(new_path),
                         }
                     )
+                    continue
+                if nxt in visited:
+                    continue
+                dfs(nxt, new_amount, new_path, visited | {nxt}, depth - 1)
+
+        dfs(start_item, 1.0, [], {start_item}, 3)
+        results.sort(key=lambda entry: (-float(entry["profit"]), int(entry["hops"])))
         return results[:10]
