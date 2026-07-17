@@ -36,7 +36,10 @@ from services.rustplus.live_format import (
     collect_item_offers,
     filter_vendor_catalog_items,
     filter_vendors_by_kind,
+    profit_routes_signature,
     upkeep_hours_left,
+    vendor_catalog_signature,
+    vendor_offers_signature,
     vendors_state_signature,
 )
 from services.rustplus.service import RustPlusService
@@ -58,6 +61,8 @@ class RustPlusHubFeature(Feature):
     VENDOR_OFFER_PAGE_SIZE = 20
     MAX_VENDOR_ORDERS = 3
     VENDOR_REFRESH_DEBOUNCE_MS = 500
+    PROFIT_SCAN_DEBOUNCE_MS = 800
+    MAX_PROFIT_ROUTES = 25
     MAP_SYNC_DEBOUNCE_MS = 200
 
     def __init__(
@@ -92,7 +97,8 @@ class RustPlusHubFeature(Feature):
         self._vendors_frame: Optional[ctk.CTkFrame] = None
         self._devices_frame: Optional[ctk.CTkFrame] = None
         self._vendor_search: Optional[ctk.StringVar] = None
-        self._vendor_kind_var = ctk.StringVar(value="all")
+        self._vendor_kind_var = ctk.StringVar(value="player")
+        self._vendor_kind_buttons: Dict[str, ctk.CTkButton] = {}
         self._vendors_count_label: Optional[ctk.CTkLabel] = None
         self._vendor_page_label: Optional[ctk.CTkLabel] = None
         self._vendor_watch_btn: Optional[ctk.CTkButton] = None
@@ -107,6 +113,7 @@ class RustPlusHubFeature(Feature):
         self._death_expiry_job: Optional[str] = None
         self._event_dock_job: Optional[str] = None
         self._vendors_signature: Optional[str] = None
+        self._vendor_display_signature: Optional[str] = None
         self._map_overlay_signature: Optional[str] = None
         self._map_preview: Optional[ctk.CTkLabel] = None
         self._map_image_ref: Optional[ctk.CTkImage] = None
@@ -147,6 +154,13 @@ class RustPlusHubFeature(Feature):
         self._devices_busy_label: Optional[BusyLabel] = None
         self._chat_send_btn: Optional[BusyButton] = None
         self._profit_btn: Optional[BusyButton] = None
+        self._profit_routes_frame: Optional[ctk.CTkScrollableFrame] = None
+        self._profit_status_label: Optional[ctk.CTkLabel] = None
+        self._profit_routes_cache: List[Dict[str, Any]] = []
+        self._profit_icon_refs: List[ctk.CTkImage] = []
+        self._profit_scan_job: Optional[str] = None
+        self._profit_market_signature: Optional[str] = None
+        self._profit_routes_signature: Optional[str] = None
         self._connect_buttons: Dict[str, BusyButton] = {}
 
         for event_type in EventType:
@@ -208,6 +222,7 @@ class RustPlusHubFeature(Feature):
         tab_map = self._tabs.add("Карта")
         tab_shops = self._tabs.add("Магазины")
         tab_devices = self._tabs.add("Устройства")
+        tab_notifications = self._tabs.add("Уведомления")
         tab_settings = self._tabs.add("Настройки")
 
         self._build_connect_tab(tab_connect)
@@ -215,6 +230,7 @@ class RustPlusHubFeature(Feature):
         self._build_map_tab(tab_map)
         self._build_shops_tab(tab_shops)
         self._build_devices_tab(tab_devices)
+        self._build_notifications_tab(tab_notifications)
         self._build_settings_tab(tab_settings)
 
         self._refresh_status()
@@ -384,12 +400,19 @@ class RustPlusHubFeature(Feature):
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_vendors_section(scroll)
+        self._build_shop_analytics_section(scroll)
 
     def _build_devices_tab(self, parent: ctk.CTkFrame) -> None:
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_devices_section(scroll)
+        self._build_device_hotkeys_section(scroll)
         self._build_cameras_section(scroll)
+
+    def _build_notifications_tab(self, parent: ctk.CTkFrame) -> None:
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=4, pady=4)
+        self._build_notifications_section(scroll)
 
     def _build_settings_tab(self, parent: ctk.CTkFrame) -> None:
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
@@ -455,13 +478,16 @@ class RustPlusHubFeature(Feature):
         filter_row = ctk.CTkFrame(parent, fg_color="transparent")
         filter_row.pack(fill="x", padx=4, pady=(0, 6))
         for kind, label in [("all", "Все"), ("player", "Игроки"), ("monument", "Монументы")]:
-            btn_secondary(
+            btn = btn_secondary(
                 filter_row,
                 label,
                 lambda k=kind: self._set_vendor_kind(k),
                 width=88,
                 height=28,
-            ).pack(side="left", padx=(0, 4))
+            )
+            btn.pack(side="left", padx=(0, 4))
+            self._vendor_kind_buttons[kind] = btn
+        self._refresh_vendor_kind_buttons()
         self._vendors_count_label = ctk.CTkLabel(
             filter_row,
             text="",
@@ -519,6 +545,42 @@ class RustPlusHubFeature(Feature):
             self._vendors_frame, text="Нет товаров в наличии", text_color=Theme.DIM,
         ).pack(anchor="w", padx=10, pady=10)
 
+    def _build_shop_analytics_section(self, parent: ctk.CTkScrollableFrame) -> None:
+        self._section_title(
+            parent,
+            "Аналитика магазинов",
+            "Поиск выгодных сделок между вендингами на текущем сервере.",
+        )
+        analytics_card = panel(parent)
+        analytics_card.pack(fill="x", padx=4, pady=(0, 8))
+        head_row = ctk.CTkFrame(analytics_card, fg_color="transparent")
+        head_row.pack(fill="x", padx=10, pady=(10, 6))
+        self._profit_status_label = ctk.CTkLabel(
+            head_row,
+            text="Сканируем все лавки…",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.TEXT,
+        )
+        self._profit_status_label.pack(side="left", fill="x", expand=True)
+        self._profit_btn = BusyButton(
+            btn_secondary(head_row, "Обновить", lambda: self._show_profit(force=True), width=96, height=28)
+        )
+        self._profit_btn.widget.pack(side="right")
+        hint_label(
+            analytics_card,
+            "Ищет выгодные цепочки обменов для всех валют из лавок: стартуете с 1 шт. "
+            "и возвращаетесь к той же валюте с прибылью (до 3 шагов).",
+        )
+        self._profit_routes_frame = ctk.CTkScrollableFrame(
+            analytics_card,
+            fg_color=Theme.PANEL,
+            height=220,
+            corner_radius=8,
+        )
+        self._profit_routes_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self._render_profit_routes([])
+
     def _build_devices_section(self, parent: ctk.CTkScrollableFrame) -> None:
         head = ctk.CTkFrame(parent, fg_color="transparent")
         head.pack(fill="x", padx=4, pady=(10, 6))
@@ -575,6 +637,98 @@ class RustPlusHubFeature(Feature):
         else:
             self._set_status("Устройства обновлены")
         self._root.after(1200, self._end_devices_refresh)
+
+    def _build_device_hotkeys_section(self, parent: ctk.CTkScrollableFrame) -> None:
+        self._section_title(
+            parent,
+            "Горячие клавиши и группы",
+            "Switch галочками — видно, что попадёт в группу. Hotkey на один Switch или на группу.",
+        )
+        hotkeys_card = panel(parent)
+        hotkeys_card.pack(fill="x", padx=4, pady=(0, 8))
+
+        share_row = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        share_row.pack(fill="x", padx=10, pady=(10, 8))
+        btn_secondary(share_row, "Экспорт в буфер", self._export_devices, width=120, height=28).pack(side="left", padx=(0, 6))
+        btn_secondary(share_row, "Импорт", self._import_devices_dialog, width=80, height=28).pack(side="left")
+        hint_label(hotkeys_card, "В чате: !share и !import — или вставьте base64 вручную.")
+
+        field_label(hotkeys_card, "Выбор Switch")
+        pick_actions = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        pick_actions.pack(fill="x", padx=10, pady=(0, 4))
+        btn_secondary(pick_actions, "Все", self._select_all_switches, width=60, height=26).pack(side="left", padx=(0, 6))
+        btn_secondary(pick_actions, "Сбросить", self._clear_switch_selection, width=80, height=26).pack(side="left")
+        self._switch_pick_frame = ctk.CTkScrollableFrame(
+            hotkeys_card, fg_color=Theme.CARD_ALT, height=110, corner_radius=8,
+        )
+        self._switch_pick_frame.pack(fill="x", padx=10, pady=(0, 4))
+        self._selection_summary = ctk.CTkLabel(
+            hotkeys_card,
+            text="Ничего не выбрано",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=480,
+        )
+        self._selection_summary.pack(fill="x", padx=10, pady=(0, 8))
+
+        field_label(hotkeys_card, "Группа из выбранных")
+        group_row = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        group_row.pack(fill="x", padx=10, pady=(0, 8))
+        self._group_name_var = ctk.StringVar(value="Группа")
+        ctk.CTkEntry(
+            group_row, textvariable=self._group_name_var, width=120, height=28,
+            placeholder_text="Название", corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            group_row, "Создать группу", self._create_switch_group, width=120, height=28,
+        ).pack(side="left")
+
+        field_label(hotkeys_card, "Горячая клавиша")
+        hotkey_row = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        hotkey_row.pack(fill="x", padx=10, pady=(0, 4))
+        self._hotkey_action_var = ctk.StringVar(value="toggle")
+        ctk.CTkOptionMenu(
+            hotkey_row,
+            variable=self._hotkey_action_var,
+            values=["toggle", "on", "off"],
+            width=90,
+            height=28,
+        ).pack(side="left", padx=(0, 6))
+        btn_primary(
+            hotkey_row, "Забиндить выбранные", self._bind_hotkey_to_selection, width=150, height=28,
+        ).pack(side="left", padx=(0, 6))
+        hint_label(
+            hotkeys_card,
+            "Нажмите кнопку бинда → затем нужную клавишу на клавиатуре. Esc — отмена. "
+            "1 Switch → на него; несколько → группа. У группы/Switch кнопка ⌨ — то же самое.",
+        )
+
+        field_label(hotkeys_card, "Группы и привязки")
+        self._groups_list_frame = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        self._groups_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+        self._hotkeys_list_frame = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        self._hotkeys_list_frame.pack(fill="x", padx=10, pady=(4, 0))
+        field_label(hotkeys_card, "Алиасы chat-команд")
+        alias_row = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        alias_row.pack(fill="x", padx=10, pady=(8, 4))
+        self._alias_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            alias_row, textvariable=self._alias_var, width=140, height=28,
+            placeholder_text="alias, напр. bunker", corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            alias_row, "На выбранный Switch", self._assign_alias_to_selection, width=150, height=28,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(
+            alias_row, "На группу", self._assign_alias_to_group_dialog, width=100, height=28,
+        ).pack(side="left")
+        self._aliases_list_frame = ctk.CTkFrame(hotkeys_card, fg_color="transparent")
+        self._aliases_list_frame.pack(fill="x", padx=10, pady=(4, 10))
+        self._switch_check_vars: Dict[str, ctk.BooleanVar] = {}
+        self._refresh_switch_picker()
+        self._refresh_groups_label()
 
     def _build_cameras_section(self, parent: ctk.CTkScrollableFrame) -> None:
         self._section_title(parent, "Камеры", "CCTV / PTZ — DOME1, OILRIG1L1…")
@@ -642,6 +796,27 @@ class RustPlusHubFeature(Feature):
         hint_label(layers_card, "Магазины — во вкладке «Магазины», на карту не выводятся.")
         hint_label(layers_card, "Слои применяются сразу к миникарте и большой карте.")
 
+        follow = self._service.store.get_follow_steam_id()
+        follow_card = panel(parent)
+        follow_card.pack(fill="x", padx=4, pady=(0, 8))
+        field_label(follow_card, "Smart Follow — Steam ID игрока")
+        follow_row = ctk.CTkFrame(follow_card, fg_color="transparent")
+        follow_row.pack(fill="x", padx=10, pady=(0, 6))
+        self._follow_var = ctk.StringVar(value=str(follow) if follow else "")
+        ctk.CTkEntry(
+            follow_row,
+            textvariable=self._follow_var,
+            width=200,
+            height=30,
+            placeholder_text="76561198…",
+            corner_radius=8,
+        ).pack(side="left", padx=(0, 6))
+        btn_secondary(follow_row, "Применить", self._save_follow, width=90, height=30).pack(side="left")
+        hint_label(follow_card, "Миникарта и большая карта центрируются на этом игроке.")
+        btn_secondary(
+            follow_card, "Очистить маркеры смерти", self._clear_deaths, width=180, height=28,
+        ).pack(anchor="w", padx=10, pady=(4, 10))
+
         self._map_preview = ctk.CTkLabel(
             parent,
             text="Карта появится после подключения к серверу",
@@ -653,13 +828,12 @@ class RustPlusHubFeature(Feature):
         self._map_preview.pack(fill="x", padx=4, pady=(0, 8))
         self._map_preview.bind("<Button-1>", lambda _e: self._open_map_window())
 
-    def _build_settings_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_notifications_section(self, parent: ctk.CTkScrollableFrame) -> None:
         self._section_title(
             parent,
-            "Настройки",
-            "Сгруппировано по смыслу — меняйте только нужный блок",
+            "Уведомления",
+            "Снятая галочка убирает toast и алерты (каталог шопов — вкладка «Магазины»).",
         )
-
         alerts = self._service.store.get_alert_settings()
         self._alert_vars = {
             "cargo": ctk.BooleanVar(value=alerts.cargo),
@@ -675,11 +849,8 @@ class RustPlusHubFeature(Feature):
             "cargo_departure": ctk.BooleanVar(value=alerts.cargo_departure),
             "team_online": ctk.BooleanVar(value=alerts.team_online),
         }
-        alerts_body = settings_group(
-            parent,
-            "Уведомления и карта",
-            "Снятая галочка убирает toast и алерты (каталог шопов — вкладка «Магазины»).",
-        )
+        alerts_card = panel(parent)
+        alerts_card.pack(fill="x", padx=4, pady=(0, 8))
         alert_hints = {
             "cargo": "Карго, верт, chinook — события и алерты",
             "death": "Смерти тиммейтов + маркеры на карте",
@@ -705,8 +876,8 @@ class RustPlusHubFeature(Feature):
             ("cargo_departure", "Cargo: Departure"),
             ("team_online", "Team: Online"),
         ]:
-            row = ctk.CTkFrame(alerts_body, fg_color="transparent")
-            row.pack(fill="x", pady=2)
+            row = ctk.CTkFrame(alerts_card, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=2)
             ctk.CTkCheckBox(
                 row,
                 text=label,
@@ -722,7 +893,43 @@ class RustPlusHubFeature(Feature):
                 anchor="w",
             ).pack(side="left", padx=(8, 0))
 
+    def _build_settings_section(self, parent: ctk.CTkScrollableFrame) -> None:
+        self._section_title(
+            parent,
+            "Настройки",
+            "Сгруппировано по смыслу — меняйте только нужный блок",
+        )
+
         settings = self._service.store.get_settings()
+        connection_body = settings_group(
+            parent,
+            "Подключение Rust+",
+            "Как часто обновляются команда, карта, события и магазины.",
+        )
+        field_label(connection_body, "Частота опроса")
+        poll_row = ctk.CTkFrame(connection_body, fg_color="transparent")
+        poll_row.pack(fill="x", pady=(0, 6))
+        self._poll_interval_var = ctk.StringVar(value=str(settings.poll_interval_sec))
+        ctk.CTkOptionMenu(
+            poll_row,
+            variable=self._poll_interval_var,
+            values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+            width=90,
+            height=28,
+            command=lambda _value: self._save_poll_interval(),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            poll_row,
+            text="сек",
+            font=ctk.CTkFont(size=10),
+            text_color=Theme.DIM,
+            anchor="w",
+        ).pack(side="left", padx=(8, 0))
+        hint_label(
+            connection_body,
+            "1 с — максимально часто. 10 с — щадящий режим. При 1–2 с возможны задержки из‑за лимитов Rust+.",
+        )
+
         app_body = settings_group(
             parent,
             "Приложение",
@@ -744,162 +951,6 @@ class RustPlusHubFeature(Feature):
             ctk.CTkLabel(
                 row, text=tip, font=ctk.CTkFont(size=10), text_color=Theme.DIM, anchor="w",
             ).pack(side="left", padx=(8, 0))
-
-        map_body = settings_group(
-            parent,
-            "Карта",
-            "Следование камеры и очистка маркеров смерти.",
-        )
-        field_label(map_body, "Smart Follow — Steam ID игрока")
-        follow_row = ctk.CTkFrame(map_body, fg_color="transparent")
-        follow_row.pack(fill="x", pady=(0, 6))
-        self._follow_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            follow_row,
-            textvariable=self._follow_var,
-            width=200,
-            height=30,
-            placeholder_text="76561198…",
-            corner_radius=8,
-        ).pack(side="left", padx=(0, 6))
-        btn_secondary(follow_row, "Применить", self._save_follow, width=90, height=30).pack(side="left")
-        hint_label(map_body, "Миникарта и большая карта центрируются на этом игроке.")
-        btn_secondary(
-            map_body, "Очистить маркеры смерти", self._clear_deaths, width=180, height=28,
-        ).pack(anchor="w", pady=(4, 0))
-
-        devices_body = settings_group(
-            parent,
-            "Устройства и горячие клавиши",
-            "Выберите Switch галочками — видно, что попадёт в группу. Hotkey на один Switch или на группу.",
-        )
-        share_row = ctk.CTkFrame(devices_body, fg_color="transparent")
-        share_row.pack(fill="x", pady=(0, 8))
-        btn_secondary(share_row, "Экспорт в буфер", self._export_devices, width=120, height=28).pack(side="left", padx=(0, 6))
-        btn_secondary(share_row, "Импорт", self._import_devices_dialog, width=80, height=28).pack(side="left")
-        hint_label(devices_body, "В чате: !share и !import — или вставьте base64 вручную.")
-
-        field_label(devices_body, "Выбор Switch")
-        pick_actions = ctk.CTkFrame(devices_body, fg_color="transparent")
-        pick_actions.pack(fill="x", pady=(0, 4))
-        btn_secondary(pick_actions, "Все", self._select_all_switches, width=60, height=26).pack(side="left", padx=(0, 6))
-        btn_secondary(pick_actions, "Сбросить", self._clear_switch_selection, width=80, height=26).pack(side="left")
-        self._switch_pick_frame = ctk.CTkScrollableFrame(
-            devices_body, fg_color=Theme.CARD_ALT, height=110, corner_radius=8,
-        )
-        self._switch_pick_frame.pack(fill="x", pady=(0, 4))
-        self._selection_summary = ctk.CTkLabel(
-            devices_body,
-            text="Ничего не выбрано",
-            font=ctk.CTkFont(size=11),
-            text_color=Theme.MUTED,
-            anchor="w",
-            justify="left",
-            wraplength=480,
-        )
-        self._selection_summary.pack(fill="x", pady=(0, 8))
-
-        field_label(devices_body, "Группа из выбранных")
-        group_row = ctk.CTkFrame(devices_body, fg_color="transparent")
-        group_row.pack(fill="x", pady=(0, 8))
-        self._group_name_var = ctk.StringVar(value="Группа")
-        ctk.CTkEntry(
-            group_row, textvariable=self._group_name_var, width=120, height=28,
-            placeholder_text="Название", corner_radius=8,
-        ).pack(side="left", padx=(0, 6))
-        btn_secondary(
-            group_row, "Создать группу", self._create_switch_group, width=120, height=28,
-        ).pack(side="left")
-
-        field_label(devices_body, "Горячая клавиша")
-        hotkey_row = ctk.CTkFrame(devices_body, fg_color="transparent")
-        hotkey_row.pack(fill="x", pady=(0, 4))
-        self._hotkey_action_var = ctk.StringVar(value="toggle")
-        ctk.CTkOptionMenu(
-            hotkey_row,
-            variable=self._hotkey_action_var,
-            values=["toggle", "on", "off"],
-            width=90,
-            height=28,
-        ).pack(side="left", padx=(0, 6))
-        btn_primary(
-            hotkey_row, "Забиндить выбранные", self._bind_hotkey_to_selection, width=150, height=28,
-        ).pack(side="left", padx=(0, 6))
-        hint_label(
-            devices_body,
-            "Нажмите кнопку бинда → затем нужную клавишу на клавиатуре. Esc — отмена. "
-            "1 Switch → на него; несколько → группа. У группы/Switch кнопка ⌨ — то же самое.",
-        )
-
-        field_label(devices_body, "Группы и привязки")
-        self._groups_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
-        self._groups_list_frame.pack(fill="x", pady=(0, 4))
-        self._hotkeys_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
-        self._hotkeys_list_frame.pack(fill="x", pady=(4, 0))
-        field_label(devices_body, "Алиасы chat-команд")
-        alias_row = ctk.CTkFrame(devices_body, fg_color="transparent")
-        alias_row.pack(fill="x", pady=(8, 4))
-        self._alias_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            alias_row, textvariable=self._alias_var, width=140, height=28,
-            placeholder_text="alias, напр. bunker", corner_radius=8,
-        ).pack(side="left", padx=(0, 6))
-        btn_secondary(
-            alias_row, "На выбранный Switch", self._assign_alias_to_selection, width=150, height=28,
-        ).pack(side="left", padx=(0, 6))
-        btn_secondary(
-            alias_row, "На группу", self._assign_alias_to_group_dialog, width=100, height=28,
-        ).pack(side="left")
-        self._aliases_list_frame = ctk.CTkFrame(devices_body, fg_color="transparent")
-        self._aliases_list_frame.pack(fill="x", pady=(4, 0))
-        self._switch_check_vars: Dict[str, ctk.BooleanVar] = {}
-        self._refresh_switch_picker()
-        self._refresh_groups_label()
-
-        shop_body = settings_group(
-            parent,
-            "Аналитика магазинов",
-            "Поиск выгодных сделок между вендингами на текущем сервере.",
-        )
-        field_label(shop_body, "Частота опроса Rust+")
-        poll_row = ctk.CTkFrame(shop_body, fg_color="transparent")
-        poll_row.pack(fill="x", pady=(0, 6))
-        self._poll_interval_var = ctk.StringVar(value=str(settings.poll_interval_sec))
-        ctk.CTkOptionMenu(
-            poll_row,
-            variable=self._poll_interval_var,
-            values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
-            width=90,
-            height=28,
-            command=lambda _value: self._save_poll_interval(),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            poll_row,
-            text="сек · команда, карта, магазины",
-            font=ctk.CTkFont(size=10),
-            text_color=Theme.DIM,
-            anchor="w",
-        ).pack(side="left", padx=(8, 0))
-        hint_label(
-            shop_body,
-            "1 с — максимально часто. 10 с — щадящий режим. При 1–2 с возможны задержки из‑за лимитов Rust+.",
-        )
-        field_label(shop_body, "Item ID для расчёта profit")
-        profit_row = ctk.CTkFrame(shop_body, fg_color="transparent")
-        profit_row.pack(fill="x")
-        self._profit_item_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            profit_row, textvariable=self._profit_item_var, width=100, height=28,
-            placeholder_text="напр. -151838493", corner_radius=8,
-        ).pack(side="left", padx=(0, 6))
-        self._profit_btn = BusyButton(
-            btn_secondary(profit_row, "Найти маршрут", self._show_profit, width=110, height=28)
-        )
-        self._profit_btn.widget.pack(side="left")
-        self._profit_label = ctk.CTkLabel(
-            shop_body, text="", font=ctk.CTkFont(size=10), text_color=Theme.MUTED, anchor="w", wraplength=500,
-        )
-        self._profit_label.pack(fill="x", pady=(6, 0))
 
         cross_body = settings_group(
             parent,
@@ -966,7 +1017,7 @@ class RustPlusHubFeature(Feature):
         ).pack(side="left")
         self._intel_label = ctk.CTkLabel(
             intel_body,
-            text="Укажите Steam ID в блоке «Карта» или дождитесь данных по команде",
+            text="Укажите Steam ID во вкладке «Карта» или дождитесь данных по команде",
             font=ctk.CTkFont(size=10),
             text_color=Theme.DIM,
             anchor="w",
@@ -992,7 +1043,6 @@ class RustPlusHubFeature(Feature):
         )
         self._fcm_warn_label.pack(fill="x", padx=12, pady=(0, 12))
         self._refresh_fcm_warning()
-        self._refresh_groups_label()
 
     def _save_alert_settings(self) -> None:
         alerts = AlertSettings(
@@ -1227,39 +1277,123 @@ class RustPlusHubFeature(Feature):
 
         self._death_expiry_job = self._root.after(delay_ms, on_expire)
 
-    def _show_profit(self) -> None:
-        raw = self._profit_item_var.get().strip()
-        if not raw.isdigit():
-            self._set_status("Укажите числовой item id", error=True)
+    def _schedule_profit_scan(self, *, force: bool = False) -> None:
+        if self._profit_scan_job:
+            self._root.after_cancel(self._profit_scan_job)
+
+        def run() -> None:
+            self._profit_scan_job = None
+            market_signature = vendors_state_signature(self._vendors_cache)
+            if not force and market_signature == self._profit_market_signature:
+                return
+            self._profit_market_signature = market_signature
+            self._show_profit(force=True)
+
+        self._profit_scan_job = self._root.after(self.PROFIT_SCAN_DEBOUNCE_MS, run)
+
+    def _render_profit_routes(self, routes: List[Dict[str, Any]]) -> None:
+        if not self._profit_routes_frame:
+            return
+        self._clear_frame(self._profit_routes_frame)
+        self._profit_icon_refs.clear()
+
+        if not routes:
+            ctk.CTkLabel(
+                self._profit_routes_frame,
+                text="Нет выгодных маршрутов",
+                text_color=Theme.DIM,
+                font=ctk.CTkFont(size=10),
+            ).pack(anchor="w", padx=8, pady=8)
+            return
+
+        icons = self._service.item_icons
+        icon_size = 24
+        for trade in routes:
+            item_id = int(trade.get("item_id") or 0)
+            card = ctk.CTkFrame(self._profit_routes_frame, fg_color=Theme.CARD_ALT, corner_radius=8)
+            card.pack(fill="x", padx=8, pady=4)
+
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=(8, 4))
+            icon_label = ctk.CTkLabel(
+                row,
+                text="",
+                width=icon_size,
+                height=icon_size,
+                fg_color="transparent",
+            )
+            icon_label.pack(side="left", padx=(0, 8))
+            self._queue_item_icon(icon_label, item_id, icon_size, icons, refs=self._profit_icon_refs)
+
+            title = ctk.CTkLabel(
+                row,
+                text=(
+                    f"{trade.get('item_name', icons.item_name(item_id))}  ·  "
+                    f"+{trade.get('profit_percent', 0)}% · x{trade.get('final_amount', 0)} · "
+                    f"{trade.get('hops', 0)} шага"
+                ),
+                anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=Theme.TEXT,
+            )
+            title.pack(side="left", fill="x", expand=True)
+
+            ctk.CTkLabel(
+                card,
+                text=str(trade.get("route", "")),
+                anchor="w",
+                justify="left",
+                wraplength=500,
+                font=ctk.CTkFont(size=10),
+                text_color=Theme.MUTED,
+            ).pack(fill="x", padx=8, pady=(0, 8))
+
+    def _show_profit(self, *, force: bool = False) -> None:
+        if not self._vendors_cache:
+            if self._profit_status_label:
+                self._profit_status_label.configure(text="Нет данных по лавкам")
+            self._render_profit_routes([])
             return
         if self._ops.is_busy("profit_search"):
             return
+        if force:
+            self._profit_market_signature = None
         self._ops.acquire("profit_search")
         if self._profit_btn:
             self._profit_btn.begin("Считаю")
-        self._profit_label.configure(text="Ищем маршруты…")
-        item_id = int(raw)
+        if self._profit_status_label:
+            self._profit_status_label.configure(text="Сканируем все лавки…")
 
         def worker() -> None:
-            trades = self._service.profit_trades(item_id)
-            self._root.after(0, lambda: self._apply_profit_result(trades))
+            routes = self._service.profit_trades_all(limit=self.MAX_PROFIT_ROUTES)
+            self._root.after(0, lambda: self._apply_profit_routes_result(routes))
 
         threading.Thread(target=worker, daemon=True, name="ProfitSearch").start()
 
-    def _apply_profit_result(self, trades) -> None:
+    def _apply_profit_routes_result(self, routes: List[Dict[str, Any]]) -> None:
         self._ops.release("profit_search")
         if self._profit_btn:
             self._profit_btn.end()
-        if not trades:
-            self._profit_label.configure(text="Нет выгодных маршрутов")
+
+        self._profit_market_signature = vendors_state_signature(self._vendors_cache)
+
+        signature = profit_routes_signature(routes)
+        if signature == self._profit_routes_signature:
+            if self._profit_status_label:
+                count = len(routes)
+                self._profit_status_label.configure(
+                    text=f"Найдено маршрутов: {count}" if count else "Нет выгодных маршрутов",
+                )
             return
-        first = trades[0]
-        self._profit_label.configure(
-            text=(
-                f"+{first['profit_percent']}% · x{first['final_amount']} · "
-                f"{first['hops']} шага | {first['route']}"
-            ),
-        )
+
+        self._profit_routes_signature = signature
+        self._profit_routes_cache = routes
+        if self._profit_status_label:
+            count = len(routes)
+            self._profit_status_label.configure(
+                text=f"Найдено маршрутов: {count}" if count else "Нет выгодных маршрутов",
+            )
+        self._render_profit_routes(routes)
 
     def _create_switch_group(self) -> None:
         server = self._service.get_active_server()
@@ -1679,18 +1813,45 @@ class RustPlusHubFeature(Feature):
         if self._is_shops_tab_active():
             self._apply_vendor_filters(render_panel=True)
 
+    def _compute_vendor_display_signature(self) -> str:
+        kind = self._vendor_kind_var.get()
+        if self._vendor_view_mode == "offers" and self._vendor_selected_item_id is not None:
+            offers = self._current_vendor_offers_page()
+            payload = vendor_offers_signature(offers)
+            return (
+                f"offers|{self._vendor_selected_item_id}|{self._vendor_page}|{kind}|{payload}"
+            )
+
+        query = (self._vendor_search.get().strip() if self._vendor_search else "").lower()
+        items = self._current_vendor_catalog_page()
+        payload = vendor_catalog_signature(items)
+        return f"catalog|{self._vendor_page}|{kind}|{query}|{payload}"
+
     def _schedule_vendor_refresh(self, *, force: bool = False) -> None:
         if self._vendors_render_job:
             self._root.after_cancel(self._vendors_render_job)
 
         def run() -> None:
             self._vendors_render_job = None
-            signature = vendors_state_signature(self._vendors_cache)
-            if not force and signature == self._vendors_signature:
+            self._rebuild_vendor_catalog()
+            self._schedule_profit_scan()
+            if self._vendor_view_mode == "offers" and self._vendor_selected_item_id is not None:
+                self._vendor_offers_cache = collect_item_offers(
+                    self._filtered_vendors_for_catalog(),
+                    self._vendor_selected_item_id,
+                )
+
+            self._vendors_signature = vendors_state_signature(self._vendors_cache)
+            display_sig = self._compute_vendor_display_signature()
+            if not force and display_sig == self._vendor_display_signature:
                 self._update_vendors_count_meta()
                 return
-            self._vendors_signature = signature
-            self._apply_vendor_filters(render_panel=self._is_shops_tab_active() or force)
+
+            self._vendor_display_signature = display_sig
+            if self._is_shops_tab_active() or force:
+                self._refresh_vendors_panel()
+            else:
+                self._update_vendors_count_meta()
 
         self._vendors_render_job = self._root.after(self.VENDOR_REFRESH_DEBOUNCE_MS, run)
 
@@ -1927,6 +2088,7 @@ class RustPlusHubFeature(Feature):
         else:
             self._refresh_vendor_catalog_panel()
         self._update_vendors_count_meta()
+        self._vendor_display_signature = self._compute_vendor_display_signature()
 
     def _refresh_vendor_catalog_panel(self) -> None:
         if not self._vendors_frame:
@@ -2154,11 +2316,13 @@ class RustPlusHubFeature(Feature):
         item_id: int,
         icon_size: int,
         icons,
+        *,
+        refs: Optional[List[ctk.CTkImage]] = None,
     ) -> None:
         item_id = int(item_id)
         image = icons.get(item_id)
         if image:
-            self._apply_item_icon(label, image, icon_size)
+            self._apply_item_icon(label, image, icon_size, refs=refs)
             return
 
         fallback = icons.fallback_glyph(item_id)
@@ -2167,21 +2331,48 @@ class RustPlusHubFeature(Feature):
         def on_ready(iid: int, pil_image: Image.Image) -> None:
             if not label.winfo_exists():
                 return
-            self._root.after(0, lambda: self._apply_item_icon(label, pil_image, icon_size))
+            self._root.after(0, lambda: self._apply_item_icon(label, pil_image, icon_size, refs=refs))
 
         icons.fetch_async(item_id, on_ready)
 
-    def _apply_item_icon(self, label: ctk.CTkLabel, image: Image.Image, icon_size: int) -> None:
+    def _apply_item_icon(
+        self,
+        label: ctk.CTkLabel,
+        image: Image.Image,
+        icon_size: int,
+        *,
+        refs: Optional[List[ctk.CTkImage]] = None,
+    ) -> None:
         if not label.winfo_exists():
             return
         thumb = image.copy()
         thumb.thumbnail((icon_size, icon_size), Image.Resampling.LANCZOS)
         ctk_image = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=(icon_size, icon_size))
-        self._vendor_icon_refs.append(ctk_image)
+        target_refs = self._vendor_icon_refs if refs is None else refs
+        target_refs.append(ctk_image)
         label.configure(image=ctk_image, text="")
+
+    def _refresh_vendor_kind_buttons(self) -> None:
+        selected = self._vendor_kind_var.get()
+        for kind, btn in self._vendor_kind_buttons.items():
+            if kind == selected:
+                btn.configure(
+                    fg_color=Theme.ACCENT_DARK,
+                    hover_color=Theme.ACCENT,
+                    border_color=Theme.ACCENT,
+                    text_color=Theme.TEXT,
+                )
+            else:
+                btn.configure(
+                    fg_color=Theme.CARD_ALT,
+                    hover_color=Theme.BORDER,
+                    border_color=Theme.BORDER,
+                    text_color=Theme.MUTED,
+                )
 
     def _set_vendor_kind(self, kind: str) -> None:
         self._vendor_kind_var.set(kind)
+        self._refresh_vendor_kind_buttons()
         self._vendor_page = 0
         if self._vendor_view_mode == "offers" and self._vendor_selected_item_id is not None:
             self._vendor_offers_cache = collect_item_offers(
@@ -2238,6 +2429,7 @@ class RustPlusHubFeature(Feature):
                 self._filtered_vendors_for_catalog(),
                 self._vendor_selected_item_id,
             )
+        self._vendors_signature = vendors_state_signature(self._vendors_cache)
         if render_panel:
             self._refresh_vendors_panel()
         else:
@@ -2699,6 +2891,12 @@ class RustPlusHubFeature(Feature):
             except Exception:
                 pass
             self._vendors_render_job = None
+        if self._root and self._profit_scan_job:
+            try:
+                self._root.after_cancel(self._profit_scan_job)
+            except Exception:
+                pass
+            self._profit_scan_job = None
         if self._root and self._map_sync_job:
             try:
                 self._root.after_cancel(self._map_sync_job)
@@ -3068,7 +3266,17 @@ class RustPlusHubFeature(Feature):
             self._vendor_catalog_cache = []
             self._vendor_filtered_catalog = []
             self._vendor_offers_cache = []
+            self._profit_routes_cache = []
+            self._profit_market_signature = None
+            self._profit_routes_signature = None
             self._vendors_signature = None
+            self._vendor_display_signature = None
+            if self._profit_scan_job:
+                try:
+                    self._root.after_cancel(self._profit_scan_job)
+                except Exception:
+                    pass
+                self._profit_scan_job = None
             self._map_overlay_signature = None
             self._device_states = {}
             self._server_time = ""
@@ -3086,6 +3294,9 @@ class RustPlusHubFeature(Feature):
             if self._vendor_selected_label:
                 self._vendor_selected_label.configure(text="")
             self._refresh_vendors_panel()
+            self._render_profit_routes([])
+            if self._profit_status_label:
+                self._profit_status_label.configure(text="Нет данных по лавкам")
             self._refresh_devices_panel()
             if self._info_label:
                 self._info_label.configure(text="Не подключено")
