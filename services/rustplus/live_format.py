@@ -2,12 +2,43 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from rustplus.structs.rust_marker import RustMarker
 from rustplus.structs.rust_team_info import RustTeamInfo
 
 from services.rustplus.grid_coords import world_to_grid
+
+# Монументы с NPC-лавками (safe zone). steam_id у маркеров больше не приходит.
+SAFE_ZONE_MONUMENT_TOKENS = frozenset({
+    "outpost",
+    "bandit_camp",
+    "fishing_village_display_name",
+    "large_fishing_village_display_name",
+    "stables_a",
+    "stables_b",
+})
+# На практике NPC ≤ ~50 от центра; 100 — запас для крупного Outpost.
+SAFE_ZONE_VENDOR_RADIUS = 100.0
+
+# Fallback, если карта с монументами ещё не загружена.
+_NPC_VENDOR_NAMES = frozenset({
+    "building",
+    "vendor farming",
+    "vehicles",
+    "boat vendor",
+    "weapons",
+    "exchange",
+    "shop keeper",
+    "fish exchange",
+    "components",
+    "stables shopkeeper",
+    "resources",
+    "tools & stuff",
+    "food",
+    "resource exchange",
+    "output outfitters",
+})
 
 MARKER_TYPE_NAMES = {
     RustMarker.PlayerMarker: "Игрок",
@@ -264,13 +295,106 @@ def format_marker(marker: RustMarker, map_size: Optional[int] = None) -> Dict[st
     }
 
 
-def classify_vendor(vendor: Dict[str, Any]) -> str:
+def _monument_xy(monument: Any) -> Optional[Tuple[float, float]]:
+    if isinstance(monument, dict):
+        x, y = monument.get("x"), monument.get("y")
+    else:
+        x, y = getattr(monument, "x", None), getattr(monument, "y", None)
+    if x is None or y is None:
+        return None
+    return float(x), float(y)
+
+
+def _monument_token(monument: Any) -> str:
+    if isinstance(monument, dict):
+        return str(monument.get("token") or "")
+    return str(getattr(monument, "token", "") or "")
+
+
+def format_monuments(monuments: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for monument in monuments or []:
+        xy = _monument_xy(monument)
+        token = _monument_token(monument)
+        if not xy or not token:
+            continue
+        result.append({"token": token, "x": xy[0], "y": xy[1]})
+    return result
+
+
+def is_near_safe_zone(
+    x: float,
+    y: float,
+    monuments: Optional[Sequence[Any]] = None,
+    *,
+    radius: float = SAFE_ZONE_VENDOR_RADIUS,
+) -> bool:
+    if not monuments:
+        return False
+    radius_sq = float(radius) * float(radius)
+    for monument in monuments:
+        token = _monument_token(monument)
+        if token not in SAFE_ZONE_MONUMENT_TOKENS:
+            continue
+        xy = _monument_xy(monument)
+        if not xy:
+            continue
+        dx = float(x) - xy[0]
+        dy = float(y) - xy[1]
+        if dx * dx + dy * dy <= radius_sq:
+            return True
+    return False
+
+
+def _looks_like_npc_vendor_name(name: str) -> bool:
+    normalized = (name or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in _NPC_VENDOR_NAMES:
+        return True
+    # Outpost: "Extra 1", "Extra 2", ...
+    if normalized.startswith("extra ") and normalized[6:].isdigit():
+        return True
+    return False
+
+
+def classify_vendor(
+    vendor: Dict[str, Any],
+    monuments: Optional[Sequence[Any]] = None,
+) -> str:
+    cached = vendor.get("kind")
+    if cached in ("player", "monument", "traveling"):
+        return str(cached)
     if vendor.get("type") == RustMarker.TravelingVendor:
         return "traveling"
+    # Раньше Facepunch слал steam_id владельца; сейчас почти всегда 0.
     steam_id = int(vendor.get("steam_id") or 0)
     if steam_id > 0:
         return "player"
-    return "monument"
+    x, y = vendor.get("x"), vendor.get("y")
+    if (
+        x is not None
+        and y is not None
+        and monuments
+        and is_near_safe_zone(float(x), float(y), monuments)
+    ):
+        return "monument"
+    if monuments:
+        return "player"
+    # Карта ещё не загружена — грубая эвристика по имени NPC.
+    if _looks_like_npc_vendor_name(str(vendor.get("name") or "")):
+        return "monument"
+    return "player"
+
+
+def annotate_vendor_kinds(
+    vendors: List[Dict[str, Any]],
+    monuments: Optional[Sequence[Any]] = None,
+) -> List[Dict[str, Any]]:
+    for vendor in vendors:
+        vendor.pop("kind", None)
+        vendor["kind"] = classify_vendor(vendor, monuments)
+    return vendors
 
 
 def vendor_primary_order(vendor: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -324,20 +448,83 @@ def sort_vendors_for_display(
     return sorted(vendors, key=key)
 
 
+def profit_routes_signature(routes: Sequence[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for route in routes:
+        lines.append(
+            "p|{item}|{pct}|{amt}|{hops}|{text}".format(
+                item=int(route.get("item_id") or 0),
+                pct=float(route.get("profit_percent") or 0),
+                amt=float(route.get("final_amount") or 0),
+                hops=int(route.get("hops") or 0),
+                text=str(route.get("route", "")),
+            )
+        )
+    payload = "\n".join(lines)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest() if payload else "__empty__"
+
+
+def vendor_catalog_ids_signature(items: Sequence[Dict[str, Any]]) -> str:
+    """Подпись состава каталога: только какие item_id есть в наличии."""
+    payload = ",".join(
+        str(int(item.get("item_id", 0)))
+        for item in sorted(items, key=lambda entry: int(entry.get("item_id", 0)))
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest() if payload else "__empty__"
+
+
+def vendor_catalog_signature(items: Sequence[Dict[str, Any]]) -> str:
+    """Подпись видимого каталога: только агрегаты, без остатков отдельных лавок."""
+    lines: List[str] = []
+    for item in sorted(items, key=lambda entry: int(entry.get("item_id", 0))):
+        lines.append(
+            "i|{id}|{name}|{shops}|{offers}|{cost}|{currency}".format(
+                id=int(item.get("item_id", 0)),
+                name=str(item.get("name", "")),
+                shops=int(item.get("shop_count", 0)),
+                offers=int(item.get("offer_count", 0)),
+                cost=int(item.get("min_cost", 0)),
+                currency=int(item.get("min_currency_id", 0)),
+            )
+        )
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def vendor_offers_signature(offers: Sequence[Dict[str, Any]]) -> str:
+    """Подпись видимых предложений по выбранному товару."""
+    lines: List[str] = []
+    for offer in offers:
+        vendor = offer.get("vendor") or {}
+        order = offer.get("order") or {}
+        lines.append(
+            "o|{vid}|{grid}|{kind}|{cost}|{stock}|{item}|{currency}|{qty}".format(
+                vid=int(vendor.get("id") or 0),
+                grid=str(vendor.get("grid", "")),
+                kind=str(vendor.get("kind") or classify_vendor(vendor)),
+                cost=int(order.get("cost_per_item", 0)),
+                stock=int(order.get("amount_in_stock", 0)),
+                item=int(order.get("item_id", 0)),
+                currency=int(order.get("currency_id", 0)),
+                qty=int(order.get("quantity", 0)),
+            )
+        )
+    payload = "\n".join(sorted(lines))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def vendors_state_signature(vendors: List[Dict[str, Any]]) -> str:
     """Полная подпись всех лавок: состав лотов, цены, остатки, наличие."""
     lines: List[str] = []
     for vendor in sorted(vendors, key=lambda entry: int(entry.get("id") or 0)):
         lines.append(
-            "v|{id}|{name}|{grid}|{out}|{steam}|{type}|{x}|{y}".format(
+            "v|{id}|{name}|{grid}|{out}|{steam}|{type}|{kind}".format(
                 id=int(vendor.get("id") or 0),
                 name=str(vendor.get("name", "")),
                 grid=str(vendor.get("grid", "")),
                 out=int(bool(vendor.get("out_of_stock"))),
                 steam=int(vendor.get("steam_id") or 0),
                 type=int(vendor.get("type") or 0),
-                x=vendor.get("x"),
-                y=vendor.get("y"),
+                kind=str(vendor.get("kind") or classify_vendor(vendor)),
             )
         )
         orders = vendor.get("sell_orders") or []
@@ -448,7 +635,11 @@ def filter_vendors_by_kind(vendors: List[Dict[str, Any]], kind: str) -> List[Dic
     return [vendor for vendor in vendors if classify_vendor(vendor) == kind]
 
 
-def format_markers(markers: List[RustMarker], map_size: Optional[int] = None) -> Dict[str, Any]:
+def format_markers(
+    markers: List[RustMarker],
+    map_size: Optional[int] = None,
+    monuments: Optional[Sequence[Any]] = None,
+) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     vendors: List[Dict[str, Any]] = []
     formatted = [format_marker(marker, map_size) for marker in markers]
@@ -457,6 +648,7 @@ def format_markers(markers: List[RustMarker], map_size: Optional[int] = None) ->
             events.append(item)
         if item["type"] in VENDOR_MARKER_TYPES:
             vendors.append(item)
+    annotate_vendor_kinds(vendors, monuments)
     return {"events": events, "vendors": vendors, "all": formatted}
 
 

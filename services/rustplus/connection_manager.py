@@ -19,6 +19,7 @@ from services.rustplus.event_tracker import LiveEventTracker, TeamTracker, spawn
 from services.rustplus.live_format import (
     add_motion_vectors,
     format_markers,
+    format_monuments,
     format_team,
     resolve_item_name,
     upkeep_hours_left,
@@ -42,6 +43,7 @@ class ConnectionManager:
         self._poll_task: Optional[asyncio.Task] = None
         self._running = False
         self._map_size: Optional[int] = None
+        self._monuments: list = []
         self._registered_entities: set[int] = set()
         self._event_tracker = LiveEventTracker()
         self._team_tracker = TeamTracker()
@@ -341,6 +343,8 @@ class ConnectionManager:
             )
             self._cargo_tracker.hydrate(self._store.get_cargo_state(server.id))
 
+            asyncio.create_task(self._refresh_monuments())
+
             if self._poll_task:
                 self._poll_task.cancel()
             self._poll_task = asyncio.create_task(self._poll_loop())
@@ -395,6 +399,7 @@ class ConnectionManager:
         server_id = self._connected_server.id if self._connected_server else None
         self._connected_server = None
         self._map_size = None
+        self._monuments = []
         self._registered_entities.clear()
         self._event_tracker.reset()
         self._team_tracker.reset()
@@ -521,6 +526,24 @@ class ConnectionManager:
                     await self._check_upkeep_alert(device, info)
             except Exception:
                 continue
+
+    async def _refresh_monuments(self) -> None:
+        if not self._socket:
+            return
+        try:
+            map_info = await self._poll_request(self._socket.get_map_info())
+            if isinstance(map_info, RustError) or map_info is None:
+                return
+            self._monuments = format_monuments(getattr(map_info, "monuments", None))
+            # Переклассифицируем уже закэшированные лавки, если опрос был раньше.
+            vendors = self._markers_cache.get("vendors")
+            if vendors:
+                from services.rustplus.live_format import annotate_vendor_kinds
+
+                annotate_vendor_kinds(vendors, self._monuments)
+                self._bus.emit(EventType.MARKERS, **self._markers_cache)
+        except Exception:
+            return
 
     async def _fetch_map(self) -> None:
         if not self._socket:
@@ -711,7 +734,7 @@ class ConnectionManager:
                     self._poll_failures += 1
                 else:
                     self._poll_failures = 0
-                    payload = format_markers(markers, self._map_size)
+                    payload = format_markers(markers, self._map_size, self._monuments)
                     payload["events"] = add_motion_vectors(
                         payload.get("events", []),
                         self._markers_cache.get("events", []),
