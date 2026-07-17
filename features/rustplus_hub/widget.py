@@ -206,12 +206,14 @@ class RustPlusHubFeature(Feature):
         tab_connect = self._tabs.add("Подключение")
         tab_live = self._tabs.add("Live")
         tab_map = self._tabs.add("Карта")
+        tab_shops = self._tabs.add("Магазины")
         tab_devices = self._tabs.add("Устройства")
         tab_settings = self._tabs.add("Настройки")
 
         self._build_connect_tab(tab_connect)
         self._build_live_tab(tab_live)
         self._build_map_tab(tab_map)
+        self._build_shops_tab(tab_shops)
         self._build_devices_tab(tab_devices)
         self._build_settings_tab(tab_settings)
 
@@ -377,6 +379,10 @@ class RustPlusHubFeature(Feature):
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_map_section(scroll)
+
+    def _build_shops_tab(self, parent: ctk.CTkFrame) -> None:
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_vendors_section(scroll)
 
     def _build_devices_tab(self, parent: ctk.CTkFrame) -> None:
@@ -605,7 +611,6 @@ class RustPlusHubFeature(Feature):
         self._map_layer_vars = {
             "monuments": ctk.BooleanVar(value=layers.monuments),
             "players": ctk.BooleanVar(value=layers.players),
-            "shops": ctk.BooleanVar(value=layers.shops),
         }
         layers_card = panel(parent)
         layers_card.pack(fill="x", padx=4, pady=(0, 8))
@@ -613,12 +618,10 @@ class RustPlusHubFeature(Feature):
         layer_hints = {
             "monuments": "Монументы и POI на базовой карте",
             "players": "Позиции команды на карте и оверлее",
-            "shops": "Вендинги и бродячие торговцы",
         }
         for key, label in [
             ("monuments", "Монументы"),
             ("players", "Игроки"),
-            ("shops", "Магазины"),
         ]:
             layer_row = ctk.CTkFrame(layers_card, fg_color="transparent")
             layer_row.pack(fill="x", padx=10, pady=2)
@@ -636,6 +639,7 @@ class RustPlusHubFeature(Feature):
                 text_color=Theme.DIM,
                 anchor="w",
             ).pack(side="left", padx=(8, 0))
+        hint_label(layers_card, "Магазины — во вкладке «Магазины», на карту не выводятся.")
         hint_label(layers_card, "Слои применяются сразу к миникарте и большой карте.")
 
         self._map_preview = ctk.CTkLabel(
@@ -674,7 +678,7 @@ class RustPlusHubFeature(Feature):
         alerts_body = settings_group(
             parent,
             "Уведомления и карта",
-            "Снятая галочка убирает toast и алерты (магазины на карте — во вкладке «Карта»).",
+            "Снятая галочка убирает toast и алерты (каталог шопов — вкладка «Магазины»).",
         )
         alert_hints = {
             "cargo": "Карго, верт, chinook — события и алерты",
@@ -1015,7 +1019,7 @@ class RustPlusHubFeature(Feature):
         layers = MapLayerSettings(
             monuments=self._map_layer_vars["monuments"].get(),
             players=self._map_layer_vars["players"].get(),
-            shops=self._map_layer_vars["shops"].get(),
+            shops=False,
         )
         self._service.update_map_layers(layers)
         self._map_overlay_signature = None
@@ -1029,9 +1033,8 @@ class RustPlusHubFeature(Feature):
         return self._team_cache
 
     def _map_overlay_vendors(self) -> List[Dict[str, Any]]:
-        if not self._service.store.get_map_layers().shops:
-            return []
-        return self._vendors_cache
+        # Каталог магазинов — во вкладке «Магазины», на карту не рисуем.
+        return []
 
     def _map_overlay_events(self) -> List[Dict[str, Any]]:
         if not self._service.store.get_alert_settings().cargo:
@@ -1666,14 +1669,14 @@ class RustPlusHubFeature(Feature):
             warn = self._service.store.fcm_expiry_warning()
             self._fcm_warn_label.configure(text=warn or "")
 
-    def _is_map_tab_active(self) -> bool:
+    def _is_shops_tab_active(self) -> bool:
         try:
-            return self._tabs.get().strip() == "Карта"
+            return self._tabs.get().strip() == "Магазины"
         except Exception:
             return False
 
     def _on_tab_changed(self) -> None:
-        if self._is_map_tab_active():
+        if self._is_shops_tab_active():
             self._apply_vendor_filters(render_panel=True)
 
     def _schedule_vendor_refresh(self, *, force: bool = False) -> None:
@@ -1687,7 +1690,7 @@ class RustPlusHubFeature(Feature):
                 self._update_vendors_count_meta()
                 return
             self._vendors_signature = signature
-            self._apply_vendor_filters(render_panel=self._is_map_tab_active() or force)
+            self._apply_vendor_filters(render_panel=self._is_shops_tab_active() or force)
 
         self._vendors_render_job = self._root.after(self.VENDOR_REFRESH_DEBOUNCE_MS, run)
 
@@ -1724,10 +1727,6 @@ class RustPlusHubFeature(Feature):
             )
             for e in self._events_cache[:32]
         ]
-        vendor_bits = [
-            f"{v.get('id')}:{v.get('x')}:{v.get('y')}"
-            for v in self._vendors_cache[:24]
-        ]
         death_bits = [
             f"{d.get('steam_id')}:{d.get('ts')}:{d.get('x')}:{d.get('y')}"
             for d in self._map_overlay_deaths(server_id)[:3]
@@ -1735,13 +1734,11 @@ class RustPlusHubFeature(Feature):
         return "|".join([
             str(server_id),
             str(self._map_size),
-            str(len(self._vendors_cache)),
             str(len(self._events_cache)),
             str(self._service.store.get_follow_steam_id()),
             str(self._service.store.get_tracked_event_id()),
             ",".join(team_bits),
             ",".join(event_bits),
-            ",".join(vendor_bits),
             ",".join(death_bits),
         ])
 

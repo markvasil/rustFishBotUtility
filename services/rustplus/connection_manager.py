@@ -544,7 +544,7 @@ class ConnectionManager:
                 map_image = await self._socket.get_map(
                     add_icons=bool(layers.monuments),
                     add_events=False,
-                    add_vending_machines=layers.shops,
+                    add_vending_machines=False,
                     add_team_positions=False,
                     add_grid=False,
                     override_images=override_images,

@@ -96,7 +96,7 @@ class AlertSettings:
 class MapLayerSettings:
     monuments: bool = True
     players: bool = True
-    shops: bool = True
+    shops: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -106,7 +106,8 @@ class MapLayerSettings:
         return cls(
             monuments=bool(data.get("monuments", True)),
             players=bool(data.get("players", True)),
-            shops=bool(data.get("shops", True)),
+            # Магазины вынесены во вкладку «Магазины» — на карте больше не рисуем.
+            shops=False,
         )
 
 
