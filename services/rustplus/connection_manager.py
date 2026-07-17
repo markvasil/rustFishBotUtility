@@ -19,6 +19,7 @@ from services.rustplus.event_tracker import LiveEventTracker, TeamTracker, spawn
 from services.rustplus.live_format import (
     add_motion_vectors,
     format_markers,
+    format_storage_contents,
     format_team,
     resolve_item_name,
     upkeep_hours_left,
@@ -477,9 +478,18 @@ class ConnectionManager:
 
             @EntityEvent(details, entity_id)
             async def on_entity(event, eid=entity_id, dev=device):
-                value = getattr(event, "value", None)
-                self._emit_entity_state(eid, value=value)
-                if dev.device_type == "smart_alarm" and value:
+                raw_items = getattr(event, "items", []) or []
+                fields: Dict[str, Any] = {
+                    "value": getattr(event, "value", None),
+                    "capacity": getattr(event, "capacity", None),
+                    "items": len(raw_items),
+                    "has_protection": getattr(event, "has_protection", None),
+                    "protection_expiry": getattr(event, "protection_expiry", None),
+                }
+                if dev.device_type == "storage_monitor":
+                    fields["contents"] = format_storage_contents(raw_items)
+                self._emit_entity_state(eid, **fields)
+                if dev.device_type == "smart_alarm" and fields.get("value"):
                     if self._alert_manager.should_emit("alarm"):
                         self._bus.emit(
                             EventType.LIVE_ALERT,
@@ -509,16 +519,19 @@ class ConnectionManager:
                 info = await self._socket.get_entity_info(device.entity_id)
                 if isinstance(info, RustError):
                     continue
-                self._emit_entity_state(
-                    device.entity_id,
-                    value=getattr(info, "value", None),
-                    capacity=getattr(info, "capacity", None),
-                    items=len(getattr(info, "items", []) or []),
-                    has_protection=getattr(info, "has_protection", None),
-                    protection_expiry=getattr(info, "protection_expiry", None),
-                )
+                raw_items = getattr(info, "items", []) or []
+                fields: Dict[str, Any] = {
+                    "value": getattr(info, "value", None),
+                    "capacity": getattr(info, "capacity", None),
+                    "items": len(raw_items),
+                    "has_protection": getattr(info, "has_protection", None),
+                    "protection_expiry": getattr(info, "protection_expiry", None),
+                }
                 if device.device_type == "storage_monitor":
+                    # Эквивалент RustSocket.get_contents (items + имена, стеки схлопнуты).
+                    fields["contents"] = format_storage_contents(raw_items)
                     await self._check_upkeep_alert(device, info)
+                self._emit_entity_state(device.entity_id, **fields)
             except Exception:
                 continue
 
