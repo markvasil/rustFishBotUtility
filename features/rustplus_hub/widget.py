@@ -36,6 +36,7 @@ from services.rustplus.live_format import (
     collect_item_offers,
     filter_vendor_catalog_items,
     filter_vendors_by_kind,
+    format_storage_contents_text,
     upkeep_hours_left,
     vendors_state_signature,
 )
@@ -2323,8 +2324,10 @@ class RustPlusHubFeature(Feature):
         hotkey_by_device = self._device_hotkey_hints(server.id)
 
         for device in devices:
-            row = ctk.CTkFrame(self._devices_frame, fg_color="#1a2030", corner_radius=4)
-            row.pack(fill="x", padx=4, pady=2)
+            block = ctk.CTkFrame(self._devices_frame, fg_color="#1a2030", corner_radius=4)
+            block.pack(fill="x", padx=4, pady=2)
+            row = ctk.CTkFrame(block, fg_color="transparent")
+            row.pack(fill="x")
             state = self._device_states.get(device.entity_id, {})
             if device.device_type == "smart_switch":
                 is_on = bool(state.get("value"))
@@ -2403,6 +2406,23 @@ class RustPlusHubFeature(Feature):
                     command=lambda eid=device.entity_id, var=switch_var, sw=switch: self._on_device_switch_toggle(eid, var, sw),
                 )
                 switch.pack(side="right", padx=(8, 4), pady=4)
+
+            if device.device_type == "storage_monitor":
+                contents = state.get("contents") or []
+                contents_text = format_storage_contents_text(contents)
+                box = ctk.CTkTextbox(
+                    block,
+                    height=min(96, 22 + 16 * max(1, len(contents) or 1)),
+                    fg_color="#121722",
+                    text_color="#b8c0d0",
+                    border_width=0,
+                    corner_radius=4,
+                    font=ctk.CTkFont(size=11),
+                    wrap="word",
+                )
+                box.pack(fill="x", padx=8, pady=(0, 6))
+                box.insert("1.0", contents_text)
+                box.configure(state="disabled")
         self._refresh_switch_picker()
         self.request_resize()
 
@@ -3135,13 +3155,17 @@ class RustPlusHubFeature(Feature):
             self._schedule_map_overlay_sync()
         elif event.type == EventType.ENTITY_CHANGED:
             entity_id = int(event.payload.get("entity_id", 0))
-            self._device_states[entity_id] = {
-                "value": event.payload.get("value"),
-                "capacity": event.payload.get("capacity"),
-                "items": event.payload.get("items"),
-                "has_protection": event.payload.get("has_protection"),
-                "protection_expiry": event.payload.get("protection_expiry"),
-            }
+            state = self._device_states.setdefault(entity_id, {})
+            for key in (
+                "value",
+                "capacity",
+                "items",
+                "has_protection",
+                "protection_expiry",
+                "contents",
+            ):
+                if key in event.payload:
+                    state[key] = event.payload.get(key)
             self._refresh_devices_panel()
         elif event.type == EventType.MAP_IMAGE:
             path = event.payload.get("path")

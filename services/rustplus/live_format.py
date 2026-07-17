@@ -297,6 +297,65 @@ def resolve_item_name(item_id: int, item_name_fn: Optional[Callable[[int], str]]
     return "Неизвестный предмет"
 
 
+def format_storage_contents(
+    items: Any,
+    *,
+    combine_stacks: bool = True,
+    item_name_fn: Optional[Callable[[int], str]] = None,
+) -> List[Dict[str, Any]]:
+    """Список предметов Storage Monitor (как RustSocket.get_contents)."""
+    formatted: List[Dict[str, Any]] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            item_id = int(item.get("item_id", 0) or 0)
+            quantity = int(item.get("quantity", 0) or 0)
+            is_blueprint = bool(
+                item.get("is_blueprint", item.get("item_is_blueprint", False))
+            )
+        else:
+            item_id = int(getattr(item, "item_id", 0) or 0)
+            quantity = int(getattr(item, "quantity", 0) or 0)
+            is_blueprint = bool(
+                getattr(item, "is_blueprint", None)
+                if getattr(item, "is_blueprint", None) is not None
+                else getattr(item, "item_is_blueprint", False)
+            )
+        if item_id == 0 and quantity == 0:
+            continue
+        formatted.append(
+            {
+                "name": resolve_item_name(item_id, item_name_fn),
+                "item_id": item_id,
+                "quantity": quantity,
+                "is_blueprint": is_blueprint,
+            }
+        )
+
+    if combine_stacks and formatted:
+        merged: Dict[tuple, Dict[str, Any]] = {}
+        for entry in formatted:
+            key = (entry["item_id"], entry["is_blueprint"])
+            if key in merged:
+                merged[key]["quantity"] = int(merged[key]["quantity"]) + int(entry["quantity"])
+            else:
+                merged[key] = dict(entry)
+        formatted = list(merged.values())
+
+    return sorted(formatted, key=lambda entry: str(entry.get("name", "")).lower())
+
+
+def format_storage_contents_text(contents: List[Dict[str, Any]]) -> str:
+    if not contents:
+        return "пусто"
+    lines: List[str] = []
+    for entry in contents:
+        name = str(entry.get("name", "Неизвестный предмет"))
+        qty = int(entry.get("quantity", 0) or 0)
+        suffix = " (BP)" if entry.get("is_blueprint") else ""
+        lines.append(f"{name} × {qty}{suffix}")
+    return "\n".join(lines)
+
+
 def sort_vendors_for_display(
     vendors: List[Dict[str, Any]],
     *,
