@@ -255,6 +255,12 @@ class RustPlusService:
         vendors = self.connection.markers_cache.get("vendors", [])
         return ShopTracker().profit_trades(vendors, item_id)
 
+    def profit_trades_all(self, *, limit: int = 30):
+        from services.rustplus.shop_tracker import ShopTracker
+
+        vendors = self.connection.markers_cache.get("vendors", [])
+        return ShopTracker().profit_trades_all(vendors, limit=limit)
+
     def list_shop_watch_items(self, server_id: Optional[str] = None) -> list[int]:
         return self.store.list_shop_watch_items(server_id)
 

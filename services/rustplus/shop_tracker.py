@@ -125,10 +125,8 @@ class ShopTracker:
                 self._offer_stock_state[offer_key] = int(order.get("amount_in_stock", 0))
         self._primed = True
 
-    def profit_trades(self, vendors: List[Dict[str, Any]], item_id: int) -> List[Dict[str, Any]]:
-        start_item = int(item_id)
+    def _build_edges(self, vendors: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
         edges: Dict[int, List[Dict[str, Any]]] = {}
-
         for vendor in vendors:
             for order in vendor.get("sell_orders", []):
                 source = int(order.get("currency_id", 0))
@@ -138,29 +136,38 @@ class ShopTracker:
                 stock = int(order.get("amount_in_stock", 0))
                 if source == 0 or target == 0 or cost <= 0 or qty <= 0 or stock <= 0:
                     continue
-                edge = {
-                    "source": source,
-                    "target": target,
-                    "cost": cost,
-                    "qty": qty,
-                    "rate": qty / cost,
-                    "vendor": vendor,
-                    "order": order,
-                }
-                edges.setdefault(source, []).append(edge)
-
-        results: List[Dict[str, Any]] = []
-        seen_routes: Set[Tuple[int, ...]] = set()
-
-        def route_text(path: List[Dict[str, Any]]) -> str:
-            segments: List[str] = []
-            for edge in path:
-                vendor = edge["vendor"]
-                segments.append(
-                    f"{resolve_item_name(edge['source'])} -> {resolve_item_name(edge['target'])} "
-                    f"[{vendor.get('grid', '?')}]"
+                edges.setdefault(source, []).append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "cost": cost,
+                        "qty": qty,
+                        "rate": qty / cost,
+                        "vendor": vendor,
+                        "order": order,
+                    }
                 )
-            return " | ".join(segments)
+        return edges
+
+    @staticmethod
+    def _route_text(path: List[Dict[str, Any]]) -> str:
+        segments: List[str] = []
+        for edge in path:
+            vendor = edge["vendor"]
+            segments.append(
+                f"{resolve_item_name(edge['source'])} -> {resolve_item_name(edge['target'])} "
+                f"[{vendor.get('grid', '?')}]"
+            )
+        return " | ".join(segments)
+
+    def _profit_trades_from_edges(
+        self,
+        edges: Dict[int, List[Dict[str, Any]]],
+        start_item: int,
+        seen_routes: Set[Tuple[int, ...]],
+    ) -> List[Dict[str, Any]]:
+        start_item = int(start_item)
+        results: List[Dict[str, Any]] = []
 
         def dfs(current_item: int, amount: float, path: List[Dict[str, Any]], visited: Set[int], depth: int) -> None:
             if depth == 0:
@@ -177,6 +184,7 @@ class ShopTracker:
                     results.append(
                         {
                             "item_id": start_item,
+                            "item_name": resolve_item_name(start_item),
                             "profit": round(new_amount - 1.0, 3),
                             "profit_percent": round((new_amount - 1.0) * 100.0, 1),
                             "final_amount": round(new_amount, 3),
@@ -192,7 +200,7 @@ class ShopTracker:
                                 "grid": new_path[-1]["vendor"].get("grid", "?"),
                                 "order": new_path[-1]["order"],
                             },
-                            "route": route_text(new_path),
+                            "route": self._route_text(new_path),
                         }
                     )
                     continue
@@ -201,5 +209,24 @@ class ShopTracker:
                 dfs(nxt, new_amount, new_path, visited | {nxt}, depth - 1)
 
         dfs(start_item, 1.0, [], {start_item}, 3)
+        return results
+
+    def profit_trades(self, vendors: List[Dict[str, Any]], item_id: int) -> List[Dict[str, Any]]:
+        edges = self._build_edges(vendors)
+        seen_routes: Set[Tuple[int, ...]] = set()
+        results = self._profit_trades_from_edges(edges, int(item_id), seen_routes)
         results.sort(key=lambda entry: (-float(entry["profit"]), int(entry["hops"])))
         return results[:10]
+
+    def profit_trades_all(self, vendors: List[Dict[str, Any]], *, limit: int = 30) -> List[Dict[str, Any]]:
+        edges = self._build_edges(vendors)
+        if not edges:
+            return []
+
+        seen_routes: Set[Tuple[int, ...]] = set()
+        results: List[Dict[str, Any]] = []
+        for start_item in sorted(edges.keys()):
+            results.extend(self._profit_trades_from_edges(edges, int(start_item), seen_routes))
+
+        results.sort(key=lambda entry: (-float(entry["profit"]), int(entry["hops"]), str(entry.get("item_name", ""))))
+        return results[: max(1, int(limit))]
