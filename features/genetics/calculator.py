@@ -15,6 +15,8 @@ class SlotResult:
     result_gene: str
     explanation: str
     chance: float
+    # Индексы соседей (0-based в surrounding), дающих result_gene при ничьей.
+    tie_winner_neighbor_indexes: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -23,10 +25,34 @@ class CrossbreedOutcome:
     chance: float
     center: Optional[str]
     crossbreeding: Tuple[str, ...]
+    # Порядок посадки доноров при шансе <100% (как 1st/2nd на rustbreeder.com).
+    # planting_order[i] — метка 1, 2, … для crossbreeding[i], либо None.
+    planting_order: Tuple[Optional[int], ...] = ()
+
+
+@dataclass(frozen=True)
+class _PartialCrossbreedResult:
+    genes: List[str]
+    tie_winning_indexes: Optional[Tuple[int, ...]] = None
+    tie_losing_indexes: Optional[Tuple[int, ...]] = None
 
 
 def _weight(gene: str) -> float:
     return GENE_WEIGHTS.get(gene, 0.0)
+
+
+def _planting_order_from_tie_winners(
+    donor_count: int,
+    tie_winning_indexes: Optional[Tuple[int, ...]],
+) -> Tuple[Optional[int], ...]:
+    """Метки 1st/2nd/… для доноров, дающих нужный ген в ничьей (гайд rustbreeder)."""
+    if not tie_winning_indexes:
+        return tuple(None for _ in range(donor_count))
+    labels: List[Optional[int]] = [None] * donor_count
+    for order, index in enumerate(tie_winning_indexes, start=1):
+        if 0 <= index < donor_count and labels[index] is None:
+            labels[index] = order
+    return tuple(labels)
 
 
 def normalize_genes(text: str) -> str:
@@ -94,9 +120,9 @@ def _requires_center_check(
 def _build_crossbreed_results(
     weights: List[List[Tuple[str, float, Tuple[int, ...]]]],
     center: Optional[str] = None,
-) -> List[str]:
+) -> List[_PartialCrossbreedResult]:
     center_genes = normalize_genes(center) if center else None
-    partial_results: List[List[str]] = [[]]
+    partial_results: List[_PartialCrossbreedResult] = [_PartialCrossbreedResult(genes=[])]
     definitive_ties = 0
 
     for position, position_winners in enumerate(weights):
@@ -105,27 +131,49 @@ def _build_crossbreed_results(
             center_genes is not None
             and _weight(center_genes[position]) >= donor_max
         )
-        next_partial: List[List[str]] = []
+        next_partial: List[_PartialCrossbreedResult] = []
 
         if use_center:
             assert center_genes is not None
             for partial in partial_results:
-                next_partial.append(partial + [center_genes[position]])
+                next_partial.append(
+                    _PartialCrossbreedResult(
+                        genes=partial.genes + [center_genes[position]],
+                        tie_winning_indexes=partial.tie_winning_indexes,
+                        tie_losing_indexes=partial.tie_losing_indexes,
+                    )
+                )
         elif len(position_winners) == 1:
             gene = position_winners[0][0]
             for partial in partial_results:
-                next_partial.append(partial + [gene])
+                next_partial.append(
+                    _PartialCrossbreedResult(
+                        genes=partial.genes + [gene],
+                        tie_winning_indexes=partial.tie_winning_indexes,
+                        tie_losing_indexes=partial.tie_losing_indexes,
+                    )
+                )
         else:
             definitive_ties += 1
             if definitive_ties > 1:
                 return []
-            for gene, _, _ in position_winners:
+            for gene, _, winner_indexes in position_winners:
+                loser_indexes: List[int] = []
+                for other_gene, _, other_indexes in position_winners:
+                    if other_gene != gene:
+                        loser_indexes.extend(other_indexes)
                 for partial in partial_results:
-                    next_partial.append(partial + [gene])
+                    next_partial.append(
+                        _PartialCrossbreedResult(
+                            genes=partial.genes + [gene],
+                            tie_winning_indexes=tuple(winner_indexes),
+                            tie_losing_indexes=tuple(loser_indexes),
+                        )
+                    )
 
         partial_results = next_partial
 
-    return ["".join(chars) for chars in partial_results]
+    return partial_results
 
 
 def crossbreed_combination(
@@ -143,27 +191,34 @@ def crossbreed_combination(
     normalized_pool = tuple(normalize_genes(item) for item in source_pool)
     normalized_combo = tuple(normalize_genes(item) for item in crossbreeding)
     outcomes: List[CrossbreedOutcome] = []
+    donor_count = len(normalized_combo)
 
     if _requires_center_check(crossbreeding, weights):
         others = [gene for gene in normalized_pool if gene not in normalized_combo]
         for center in others:
-            for result in _build_crossbreed_results(weights, center):
+            for partial in _build_crossbreed_results(weights, center):
                 outcomes.append(
                     CrossbreedOutcome(
-                        result=result,
+                        result="".join(partial.genes),
                         chance=0.0,
                         center=center,
                         crossbreeding=normalized_combo,
+                        planting_order=_planting_order_from_tie_winners(
+                            donor_count, partial.tie_winning_indexes
+                        ),
                     )
                 )
     else:
-        for result in _build_crossbreed_results(weights):
+        for partial in _build_crossbreed_results(weights):
             outcomes.append(
                 CrossbreedOutcome(
-                    result=result,
+                    result="".join(partial.genes),
                     chance=0.0,
                     center=None,
                     crossbreeding=normalized_combo,
+                    planting_order=_planting_order_from_tie_winners(
+                        donor_count, partial.tie_winning_indexes
+                    ),
                 )
             )
 
@@ -177,6 +232,7 @@ def crossbreed_combination(
             chance=per_combo_chance,
             center=item.center,
             crossbreeding=item.crossbreeding,
+            planting_order=item.planting_order,
         )
         for item in outcomes
     ]
@@ -201,6 +257,23 @@ def calculate_crossbreed(
     return result, slots
 
 
+def planting_order_for_planter(
+    surrounding: Tuple[str, ...],
+    slots: List[SlotResult],
+) -> Tuple[Optional[int], ...]:
+    """Метки 1st/2nd для соседей грядки при ничьей (гайд rustbreeder Example 4)."""
+    neighbors = [normalize_genes(item) for item in surrounding if item]
+    donor_count = len(neighbors)
+    if donor_count == 0:
+        return ()
+
+    for slot in slots:
+        if slot.chance >= 0.9999 or not slot.tie_winner_neighbor_indexes:
+            continue
+        return _planting_order_from_tie_winners(donor_count, slot.tie_winner_neighbor_indexes)
+    return tuple(None for _ in range(donor_count))
+
+
 def calculate_crossbreed_planter(
     center: str,
     surrounding: Tuple[str, ...],
@@ -216,9 +289,11 @@ def calculate_crossbreed_planter(
         center_w = _weight(center_gene)
 
         votes: Dict[str, float] = {}
-        for neighbor in neighbors:
+        contributors: Dict[str, List[int]] = {}
+        for neighbor_index, neighbor in enumerate(neighbors):
             gene = neighbor[i]
             votes[gene] = votes.get(gene, 0.0) + _weight(gene)
+            contributors.setdefault(gene, []).append(neighbor_index)
 
         if not votes:
             result_chars.append(center_gene)
@@ -241,16 +316,28 @@ def calculate_crossbreed_planter(
                 winner = winners[0]
                 chance = 1.0
                 explanation = f"Доноры: {max_vote:.1f} > центр {center_w:.1f}"
+                tie_winners: Tuple[int, ...] = ()
             else:
                 winner = winners[0]
                 chance = 1.0 / len(winners)
                 explanation = f"Ничья {', '.join(winners)} — шанс {chance * 100:.0f}%"
+                tie_winners = tuple(contributors.get(winner, []))
             result_chars.append(winner)
         else:
             winner = center_gene
             chance = 1.0
-            explanation = f"Центр {center_w:.1f} ≥ доноры {max_vote:.1f}"
+            explanation = f"Центр {center_w:.1f} >= доноры {max_vote:.1f}"
+            tie_winners = ()
 
-        slots.append(SlotResult(i + 1, center_gene, winner, explanation, chance))
+        slots.append(
+            SlotResult(
+                i + 1,
+                center_gene,
+                winner,
+                explanation,
+                chance,
+                tie_winners,
+            )
+        )
 
     return "".join(result_chars), slots, crossbreed_success_chance(slots)

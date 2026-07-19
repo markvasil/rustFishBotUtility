@@ -1,0 +1,3 @@
+[submodule "rustGensAIVision"]
+	path = rustGensAIVision
+	url = git@github.com:markvasil/rustGensAIVision.git

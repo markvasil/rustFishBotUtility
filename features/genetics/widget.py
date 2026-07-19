@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import winsound
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 import customtkinter as ctk
 
@@ -13,15 +13,12 @@ from features.genetics.breeding_planner import (
     format_gene_profile,
     parse_target_counts,
 )
-from features.genetics.calculator import calculate_crossbreed, normalize_genes
-from features.genetics.calibration import (
-    RegionCalibration,
-    load_calibrations,
-    profile_key,
-    save_calibrations,
+from features.genetics.calculator import (
+    calculate_crossbreed,
+    normalize_genes,
+    planting_order_for_planter,
 )
-from features.genetics.scan_preview import ScanPreviewWindow
-from features.genetics.scanner import SCAN_REGIONS, GeneScanner
+from features.genetics.scanner import GeneScanner
 from storage.session import SessionStore
 
 
@@ -35,17 +32,9 @@ class GeneticsFeature(Feature):
         self._root: Optional[ctk.CTk] = None
         self._scanner: Optional[GeneScanner] = None
         self._scan_status_var: Optional[ctk.StringVar] = None
-        self._scan_region_var: Optional[ctk.StringVar] = None
-        self._scan_resolution_var: Optional[ctk.StringVar] = None
         self._genes_text: Optional[ctk.CTkTextbox] = None
         self._scan_btn: Optional[ctk.CTkButton] = None
-        self._calibrate_btn: Optional[ctk.CTkButton] = None
-        self._done_btn: Optional[ctk.CTkButton] = None
-        self._scan_preview: Optional[ScanPreviewWindow] = None
-        self._calibrating = False
-        self._calibrated = False
         self._known_genes: Set[str] = set()
-        self._calibration: Dict = {}
 
         self._center_var: Optional[ctk.StringVar] = None
         self._top_var: Optional[ctk.StringVar] = None
@@ -65,15 +54,10 @@ class GeneticsFeature(Feature):
 
     def build(self, parent: ctk.CTkFrame) -> None:
         self._root = parent.winfo_toplevel()
-        if self._session:
-            stored = self._session.get_feature(self.id)
-            self._calibration = stored.get("calibration", {})
-            if stored.get("calibrated"):
-                self._calibrated = True
 
         ctk.CTkLabel(
             parent,
-            text="Сканируйте гены из Rust и считайте кроссбридинг (как на rustbreeder.com)",
+            text="Сканируйте гены кликом ЛКМ в Rust и считайте кроссбридинг (как на rustbreeder.com)",
             font=ctk.CTkFont(size=13),
             text_color="#a0a8b8",
         ).pack(anchor="w", padx=12, pady=(12, 8))
@@ -83,11 +67,9 @@ class GeneticsFeature(Feature):
         self._build_breeding_planner_section(parent)
         self._build_crossbreed_section(parent)
 
-        self._scan_preview = ScanPreviewWindow(self._root, on_calibration_saved=self._persist_calibrations)
         self._scanner = GeneScanner(
             on_gene_found=self._schedule_gene_found,
             on_status=self._schedule_status,
-            get_calibrations=self._current_calibrations,
         )
         self._update_target_sum_label()
         self._calculate()
@@ -99,53 +81,15 @@ class GeneticsFeature(Feature):
         controls = ctk.CTkFrame(scan_frame, fg_color="transparent")
         controls.pack(fill="x", padx=10, pady=(10, 6))
 
-        self._calibrate_btn = ctk.CTkButton(
-            controls,
-            text="Калибровка",
-            width=110,
-            fg_color="#374151",
-            hover_color="#4b5563",
-            command=self._start_calibration,
-        )
-        self._calibrate_btn.pack(side="left")
-
-        self._done_btn = ctk.CTkButton(
-            controls,
-            text="Готово",
-            width=80,
-            fg_color="#2d6a4f",
-            hover_color="#40916c",
-            command=self._finish_calibration,
-        )
-
         self._scan_btn = ctk.CTkButton(
             controls,
             text="Сканировать",
             width=120,
-            fg_color="#1f4d3a",
-            hover_color="#2d6a4f",
-            state="disabled",
+            fg_color="#2d6a4f",
+            hover_color="#40916c",
             command=self._toggle_scan,
         )
-        self._scan_btn.pack(side="left", padx=(8, 0))
-
-        self._scan_region_var = ctk.StringVar(value="Инвентарь")
-        ctk.CTkOptionMenu(
-            controls,
-            variable=self._scan_region_var,
-            values=["Оба", "Грядка", "Инвентарь"],
-            width=110,
-            command=lambda _v: self._on_scan_settings_changed(),
-        ).pack(side="left", padx=(8, 0))
-
-        self._scan_resolution_var = ctk.StringVar(value="2K")
-        ctk.CTkOptionMenu(
-            controls,
-            variable=self._scan_resolution_var,
-            values=["Авто", "1080p", "2K"],
-            width=90,
-            command=lambda _v: self._on_scan_settings_changed(),
-        ).pack(side="left", padx=(6, 0))
+        self._scan_btn.pack(side="left")
 
         ctk.CTkButton(
             controls,
@@ -157,7 +101,7 @@ class GeneticsFeature(Feature):
         ).pack(side="right")
 
         self._scan_status_var = ctk.StringVar(
-            value="1) Калибровка → двигайте рамку на гены → Готово  2) Сканировать"
+            value="Нажмите «Сканировать», затем кликайте ЛКМ по генам в Rust"
         )
         ctk.CTkLabel(
             scan_frame,
@@ -167,15 +111,6 @@ class GeneticsFeature(Feature):
             wraplength=560,
             justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 10))
-
-        ctk.CTkLabel(
-            scan_frame,
-            text="Сначала откройте растение в Rust, затем «Калибровка» → двигайте рамки 1–6 на каждый ген",
-            font=ctk.CTkFont(size=10),
-            text_color="#6b7280",
-        ).pack(anchor="w", padx=10, pady=(0, 10))
-
-        self._update_scan_button_state()
 
     def _build_gene_list_section(self, parent: ctk.CTkFrame) -> None:
         list_frame = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
@@ -233,7 +168,11 @@ class GeneticsFeature(Feature):
 
         ctk.CTkLabel(
             section,
-            text="Укажите цель (сумма = 6), выберите число поколений и нажмите Calculate",
+            text=(
+                "Укажите цель (сумма = 6), выберите число поколений и нажмите Calculate. "
+                "При шансе <100% смотрите метки 1-й/2-й — сажайте этих доноров первыми по порядку "
+                "(как на rustbreeder.com/guide)."
+            ),
             font=ctk.CTkFont(size=11),
             text_color="#8b93a7",
             wraplength=560,
@@ -538,11 +477,17 @@ class GeneticsFeature(Feature):
             ).pack(anchor="w", padx=8, pady=(6, 2))
 
             donor_lines: List[str] = []
-            for donor in step.crossbreeding:
+            for donor_index, donor in enumerate(step.crossbreeding):
+                order = (
+                    step.planting_order[donor_index]
+                    if donor_index < len(step.planting_order)
+                    else None
+                )
+                order_note = f" · {order}-й" if order is not None else ""
                 if donor in available_genes:
-                    donor_lines.append(f"• {donor}")
+                    donor_lines.append(f"• {donor}{order_note}")
                 else:
-                    donor_lines.append(f"• {donor} (вывести на предыдущем шаге)")
+                    donor_lines.append(f"• {donor}{order_note} (вывести на предыдущем шаге)")
             ctk.CTkLabel(
                 row,
                 text="Доноры:\n" + "\n".join(donor_lines),
@@ -571,6 +516,26 @@ class GeneticsFeature(Feature):
                 text_color="#b8c0d0",
                 anchor="w",
             ).pack(anchor="w", padx=8, pady=(0, 2))
+
+            if step.has_planting_order:
+                ordered = [
+                    f"{order}-й {donor}"
+                    for donor, order in zip(step.crossbreeding, step.planting_order)
+                    if order is not None
+                ]
+                ctk.CTkLabel(
+                    row,
+                    text=(
+                        "Порядок посадки (гайд): сначала "
+                        + ", затем ".join(ordered)
+                        + ", потом остальные. Слот не важен — важен только порядок."
+                    ),
+                    font=ctk.CTkFont(size=10),
+                    text_color="#f4a261",
+                    anchor="w",
+                    wraplength=520,
+                    justify="left",
+                ).pack(anchor="w", padx=8, pady=(0, 2))
 
             ctk.CTkLabel(
                 row,
@@ -656,101 +621,8 @@ class GeneticsFeature(Feature):
         self._slots_frame = ctk.CTkFrame(parent, fg_color="#10151f", corner_radius=6)
         self._slots_frame.pack(fill="x", padx=12, pady=(0, 12))
 
-    def _active_scan_regions(self) -> List[str]:
-        mode = self._scan_region_var.get() if self._scan_region_var else "Инвентарь"
-        if mode == "Грядка":
-            return ["planter"]
-        if mode == "Инвентарь":
-            return ["inventory"]
-        return ["planter", "inventory"]
-
-    def _scan_settings(self) -> tuple[List[str], str]:
-        regions = self._active_scan_regions()
-        resolution = self._scan_resolution_var.get() if self._scan_resolution_var else "2K"
-        return regions, resolution
-
-    def _current_profile_key(self) -> str:
-        _, resolution = self._scan_settings()
-        return profile_key(None, resolution)
-
-    def _current_calibrations(self) -> Dict[str, RegionCalibration]:
-        regions, resolution = self._scan_settings()
-        key = profile_key(None, resolution)
-        if self._scan_preview and (self._calibrating or self._scan_preview.is_visible):
-            live = self._scan_preview.get_calibrations()
-            merged = load_calibrations(self._calibration, key, regions)
-            merged.update(live)
-            return merged
-        return load_calibrations(self._calibration, key, regions)
-
-    def _persist_calibrations(self, calibrations: Dict[str, RegionCalibration]) -> None:
-        key = self._current_profile_key()
-        save_calibrations(self._calibration, key, calibrations)
-        if self._session:
-            self._session.update_feature(self.id, calibration=self._calibration, calibrated=True)
-
-    def _update_scan_button_state(self) -> None:
-        if not self._scan_btn:
-            return
-        if self._calibrating:
-            self._scan_btn.configure(state="disabled")
-            return
-        if self._calibrated:
-            self._scan_btn.configure(state="normal", fg_color="#2d6a4f")
-        else:
-            self._scan_btn.configure(state="disabled", fg_color="#1f4d3a")
-
-    def _start_calibration(self) -> None:
-        if not self._scan_preview:
-            return
-        if self._scanner and self._scanner.is_running:
-            self._scanner.stop()
-
-        regions, resolution = self._scan_settings()
-        key = profile_key(None, resolution)
-        calibrations = load_calibrations(self._calibration, key, regions)
-
-        self._calibrating = True
-        self._done_btn.pack(side="left", padx=(6, 0), before=self._scan_btn)
-        if self._calibrate_btn:
-            self._calibrate_btn.configure(fg_color="#2d6a4f")
-        self._update_scan_button_state()
-
-        self._scan_preview.show_calibration(regions, resolution, calibrations)
-        self._set_status("Рамки 1–6 ловят мышь, остальной экран — клики в Rust. Shift+ЛКМ — сдвинуть все")
-
-    def _finish_calibration(self) -> None:
-        if not self._scan_preview:
-            return
-
-        calibrations = self._scan_preview.finish_calibration()
-        self._persist_calibrations(calibrations)
-        self._calibrating = False
-        self._calibrated = True
-        self._done_btn.pack_forget()
-        if self._calibrate_btn:
-            self._calibrate_btn.configure(fg_color="#374151")
-        self._update_scan_button_state()
-        self._set_status("Калибровка сохранена. Теперь нажмите «Сканировать»")
-
-    def _on_scan_settings_changed(self) -> None:
-        if self._calibrating:
-            self._finish_calibration()
-            self._start_calibration()
-            return
-        if self._scanner and self._scanner.is_running:
-            regions, resolution = self._scan_settings()
-            self._scanner.stop()
-            self._scanner.set_profile(resolution)
-            self._scanner.start(regions, profile_id=resolution)
-        if self._scan_preview and self._scan_preview.is_visible and not self._calibrating:
-            regions, resolution = self._scan_settings()
-            calibrations = self._current_calibrations()
-            self._scan_preview.show_monitoring(regions, resolution, calibrations)
-
     def _toggle_scan(self) -> None:
-        if not self._scanner or not self._calibrated:
-            self._set_status("Сначала выполните калибровку")
+        if not self._scanner:
             return
 
         if self._scanner.is_running:
@@ -762,22 +634,18 @@ class GeneticsFeature(Feature):
                     self._root.after(0, _finish_stop)
 
             def _finish_stop() -> None:
-                if self._scan_preview:
-                    self._scan_preview.hide()
                 if self._scan_btn:
                     self._scan_btn.configure(state="normal", text="Сканировать", fg_color="#2d6a4f")
                 self.request_resize()
 
             self._scanner.stop_async(on_stopped)
         else:
-            regions, resolution = self._scan_settings()
-            self._set_status("Запуск сканирования…")
-            self._scanner.set_profile(resolution)
-            self._scanner.start(regions, profile_id=resolution)
-            if self._scan_preview:
-                self._scan_preview.show_monitoring(regions, resolution, self._current_calibrations())
-            if self._scan_btn:
+            self._set_status("Кликните ЛКМ по гену в Rust")
+            self._scanner.start()
+            if self._scan_btn and self._scanner.is_running:
                 self._scan_btn.configure(text="Остановить", fg_color="#9b2226")
+            elif self._scan_btn:
+                self._scan_btn.configure(text="Сканировать", fg_color="#2d6a4f")
 
     def _schedule_gene_found(self, genes: str, region_id: str) -> None:
         if self._root:
@@ -787,9 +655,10 @@ class GeneticsFeature(Feature):
         if self._root:
             self._root.after(0, lambda: self._set_status(message))
 
-    def _on_gene_found(self, genes: str, region_id: str) -> None:
+    def _on_gene_found(self, genes: str, _region_id: str) -> None:
         normalized = normalize_genes(genes)
         if normalized in self._known_genes:
+            self._set_status(f"Уже есть: {normalized}. Кликните следующий ген")
             return
 
         self._known_genes.add(normalized)
@@ -799,8 +668,7 @@ class GeneticsFeature(Feature):
             self._genes_text.insert("end", f"{prefix}{normalized}")
             self._genes_text.see("end")
 
-        region_label = SCAN_REGIONS[region_id].label if region_id in SCAN_REGIONS else region_id
-        self._set_status(f"Найдено: {normalized} ({region_label})")
+        self._set_status(f"Найдено: {normalized}. Кликните следующий ген")
         try:
             winsound.Beep(880, 120)
         except OSError:
@@ -852,14 +720,22 @@ class GeneticsFeature(Feature):
         for widget in self._slots_frame.winfo_children():
             widget.destroy()
 
+        surrounding = (
+            normalize_genes(self._top_var.get() if self._top_var else ""),
+            normalize_genes(self._bottom_var.get() if self._bottom_var else ""),
+            normalize_genes(self._left_var.get() if self._left_var else ""),
+            normalize_genes(self._right_var.get() if self._right_var else ""),
+        )
         result, slots = calculate_crossbreed(
             self._center_var.get() if self._center_var else "",
-            self._top_var.get() if self._top_var else "",
-            self._bottom_var.get() if self._bottom_var else "",
-            self._left_var.get() if self._left_var else "",
-            self._right_var.get() if self._right_var else "",
+            surrounding[0],
+            surrounding[1],
+            surrounding[2],
+            surrounding[3],
         )
         center = normalize_genes(self._center_var.get() if self._center_var else "")
+        planting_order = planting_order_for_planter(surrounding, slots)
+        neighbor_labels = ("Сверху", "Снизу", "Слева", "Справа")
 
         ctk.CTkLabel(
             self._result_frame,
@@ -872,7 +748,28 @@ class GeneticsFeature(Feature):
             text=f"Было: {center}",
             font=ctk.CTkFont(size=12),
             text_color="#9aa3b5",
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+        ).pack(anchor="w", padx=12, pady=(0, 4))
+
+        ordered_neighbors = [
+            f"{order}-й {neighbor_labels[index]}"
+            for index, order in enumerate(planting_order)
+            if order is not None and index < len(neighbor_labels) and surrounding[index]
+        ]
+        if ordered_neighbors:
+            ctk.CTkLabel(
+                self._result_frame,
+                text=(
+                    "Порядок посадки при ничьей: сначала "
+                    + ", затем ".join(ordered_neighbors)
+                    + ", потом остальные (слот не важен)."
+                ),
+                font=ctk.CTkFont(size=11),
+                text_color="#f4a261",
+                wraplength=540,
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=(0, 10))
+        else:
+            ctk.CTkLabel(self._result_frame, text="", height=6).pack()
 
         for slot in slots:
             row = ctk.CTkFrame(self._slots_frame, fg_color="#161c2a", corner_radius=4)
@@ -893,15 +790,9 @@ class GeneticsFeature(Feature):
             self._scanner.stop()
             if self._scan_btn:
                 self._scan_btn.configure(text="Сканировать", fg_color="#2d6a4f")
-        if self._scan_preview:
-            self._scan_preview.hide()
-        self._calibrating = False
-        self._done_btn.pack_forget()
 
     def on_shutdown(self) -> None:
         self._breed_calc_token += 1
         self._breed_calculating = False
         if self._scanner:
             self._scanner.stop()
-        if self._scan_preview:
-            self._scan_preview.destroy()

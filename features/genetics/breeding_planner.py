@@ -24,6 +24,8 @@ class BreedStep:
     crossbreeding: Tuple[str, ...]
     result: str
     chance: float
+    # Метки порядка посадки доноров (1, 2, …) или None — как 1st/2nd в гайде rustbreeder.
+    planting_order: Tuple[Optional[int], ...] = ()
 
     @property
     def top(self) -> str:
@@ -41,6 +43,10 @@ class BreedStep:
     def right(self) -> str:
         return self.crossbreeding[3] if len(self.crossbreeding) > 3 else ""
 
+    @property
+    def has_planting_order(self) -> bool:
+        return any(order is not None for order in self.planting_order)
+
 
 @dataclass(frozen=True)
 class BreedingPath:
@@ -57,9 +63,11 @@ class BreedingPath:
 def _breed_combo_cached(
     crossbreeding: Tuple[str, ...],
     source_pool: Tuple[str, ...],
-) -> Tuple[Tuple[str, Optional[str], float], ...]:
+) -> Tuple[Tuple[str, Optional[str], float, Tuple[Optional[int], ...]], ...]:
     outcomes = crossbreed_combination(crossbreeding, source_pool)
-    return tuple((item.result, item.center, item.chance) for item in outcomes)
+    return tuple(
+        (item.result, item.center, item.chance, item.planting_order) for item in outcomes
+    )
 
 
 def parse_target_counts(values: Dict[str, int]) -> Tuple[Dict[str, int], Optional[str]]:
@@ -286,14 +294,16 @@ def _simulate_generations(
         combos = _collect_combos(source, mandatory_count)
 
         for crossbreeding in combos:
-            for result, step_center, chance in _breed_combo_cached(crossbreeding, source_tuple):
+            for result, step_center, chance, planting_order in _breed_combo_cached(
+                crossbreeding, source_tuple
+            ):
                 if result in pool_set:
                     continue
                 matches_target = matches_gene_counts(result, target_counts)
                 if _sapling_score(result) < MIN_TRACKED_SCORE and not matches_target:
                     continue
 
-                step = BreedStep(step_center, crossbreeding, result, chance)
+                step = BreedStep(step_center, crossbreeding, result, chance, planting_order)
                 candidate = _candidate_path(step, crossbreeding, pool_set, paths_to)
                 if candidate is None:
                     continue
