@@ -9,9 +9,12 @@ import customtkinter as ctk
 from features.base import Feature
 from features.genetics.breeding_planner import (
     BreedingPath,
+    find_best_plant,
     find_breeding_paths,
     format_gene_profile,
+    gene_counts,
     parse_target_counts,
+    _sapling_score,
 )
 from features.genetics.calculator import (
     calculate_crossbreed,
@@ -48,6 +51,7 @@ class GeneticsFeature(Feature):
         self._breed_paths_frame: Optional[ctk.CTkScrollableFrame] = None
         self._breed_paths_status: Optional[ctk.StringVar] = None
         self._breed_calc_btn: Optional[ctk.CTkButton] = None
+        self._breed_best_btn: Optional[ctk.CTkButton] = None
         self._max_breed_steps_var: Optional[ctk.StringVar] = None
         self._breed_calculating = False
         self._breed_calc_token = 0
@@ -144,8 +148,10 @@ class GeneticsFeature(Feature):
         self._genes_text.pack(fill="x", padx=10, pady=(0, 10))
         self._genes_text.bind("<Button-1>", self._on_gene_click)
         self._genes_text.bind("<KeyRelease>", self._sync_known_genes)
-        self._genes_text.bind("<Control-c>", self._copy_genes_selection)
-        self._genes_text.bind("<Control-C>", self._copy_genes_selection)
+        # Ctrl+C / Ctrl+V ловим по ФИЗИЧЕСКОЙ клавише (keycode), а не по букве:
+        # при русской раскладке keysym = кириллица (м/с), и обычные <Control-v>/<Control-c>
+        # (как и встроенная вставка Tkinter) не срабатывают.
+        self._genes_text.bind("<Control-KeyPress>", self._on_genes_ctrl_key)
 
     def _build_breeding_planner_section(self, parent: ctk.CTkFrame) -> None:
         section = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
@@ -208,6 +214,16 @@ class GeneticsFeature(Feature):
         calc_row = ctk.CTkFrame(section, fg_color="transparent")
         calc_row.pack(fill="x", padx=10, pady=(0, 6))
 
+        self._breed_best_btn = ctk.CTkButton(
+            calc_row,
+            text="Найти лучший",
+            width=140,
+            fg_color="#1f6feb",
+            hover_color="#388bfd",
+            command=self._calculate_best_plant,
+        )
+        self._breed_best_btn.pack(side="left")
+
         self._breed_calc_btn = ctk.CTkButton(
             calc_row,
             text="Calculate",
@@ -216,7 +232,7 @@ class GeneticsFeature(Feature):
             hover_color="#40916c",
             command=self._calculate_breeding_paths,
         )
-        self._breed_calc_btn.pack(side="left")
+        self._breed_calc_btn.pack(side="left", padx=(8, 0))
 
         steps_cell = ctk.CTkFrame(calc_row, fg_color="transparent")
         steps_cell.pack(side="left", padx=(12, 0))
@@ -284,6 +300,30 @@ class GeneticsFeature(Feature):
         self._root.clipboard_append(text)
         self._root.update()
 
+    def _on_genes_ctrl_key(self, event=None) -> Optional[str]:
+        keycode = getattr(event, "keycode", None)
+        keysym = (getattr(event, "keysym", "") or "").lower()
+        if keycode == 86 or keysym in ("v", "cyrillic_em", "м"):  # физическая V
+            return self._paste_into_genes(event)
+        if keycode == 67 or keysym in ("c", "cyrillic_es", "с"):  # физическая C
+            return self._copy_genes_selection(event)
+        return None
+
+    def _paste_into_genes(self, _event=None) -> Optional[str]:
+        if not self._genes_text or not self._root:
+            return "break"
+        try:
+            clip = self._root.clipboard_get()
+        except Exception:
+            return "break"
+        try:
+            self._genes_text.delete("sel.first", "sel.last")
+        except Exception:
+            pass
+        self._genes_text.insert("insert", clip)
+        self._sync_known_genes()
+        return "break"
+
     def _copy_genes_selection(self, _event=None) -> Optional[str]:
         if not self._genes_text or not self._root:
             return None
@@ -346,6 +386,8 @@ class GeneticsFeature(Feature):
 
         if self._breed_calc_btn:
             self._breed_calc_btn.configure(state="disabled", text="Считаю...")
+        if self._breed_best_btn:
+            self._breed_best_btn.configure(state="disabled")
         if self._breed_paths_status:
             self._breed_paths_status.set(
                 f"Ищем пути ({gene_count} генов, до {max_steps} покол.)…"
@@ -371,10 +413,98 @@ class GeneticsFeature(Feature):
 
         threading.Thread(target=worker, daemon=True, name="BreedPlanner").start()
 
+    def _calculate_best_plant(self) -> None:
+        if not self._breed_paths_frame or self._breed_calculating:
+            return
+
+        for widget in self._breed_paths_frame.winfo_children():
+            widget.destroy()
+
+        available = self._collect_scanned_genes()
+        if not available:
+            if self._breed_paths_status:
+                self._breed_paths_status.set("Сначала отсканируйте или введите гены")
+            return
+
+        max_steps, steps_error = self._read_max_breed_steps()
+        if steps_error:
+            if self._breed_paths_status:
+                self._breed_paths_status.set(steps_error)
+            return
+
+        self._breed_calculating = True
+        self._breed_calc_token += 1
+        token = self._breed_calc_token
+        gene_count = len({normalize_genes(g) for g in available})
+
+        if self._breed_best_btn:
+            self._breed_best_btn.configure(state="disabled", text="Ищу...")
+        if self._breed_calc_btn:
+            self._breed_calc_btn.configure(state="disabled")
+        if self._breed_paths_status:
+            self._breed_paths_status.set(
+                f"Ищу лучший ген из {gene_count} клонов (до {max_steps} покол.)…"
+            )
+
+        def worker() -> None:
+            paths, search_error = find_best_plant(
+                available,
+                max_steps=max_steps,
+                max_paths=3,
+            )
+            if self._root:
+                self._root.after(
+                    0,
+                    lambda: self._apply_best_plant_result(token, paths, search_error),
+                )
+
+        threading.Thread(target=worker, daemon=True, name="BreedBest").start()
+
+    def _apply_best_plant_result(
+        self,
+        token: int,
+        paths: List[BreedingPath],
+        search_error: Optional[str],
+    ) -> None:
+        if token != self._breed_calc_token or not self._breed_paths_frame:
+            return
+
+        self._finish_breed_calculation()
+
+        for widget in self._breed_paths_frame.winfo_children():
+            widget.destroy()
+
+        if search_error or not paths:
+            message = search_error or "Ничего не удалось вывести из этих генов"
+            if self._breed_paths_status:
+                self._breed_paths_status.set(message)
+            ctk.CTkLabel(
+                self._breed_paths_frame,
+                text=message,
+                font=ctk.CTkFont(size=11),
+                text_color="#f4a261",
+                wraplength=540,
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=8)
+            self.request_resize()
+            return
+
+        best = paths[0]
+        genes_label = ", ".join(path.final for path in paths)
+        if self._breed_paths_status:
+            self._breed_paths_status.set(
+                f"Лучшие гены (score {_sapling_score(best.final):g}): {genes_label}"
+            )
+        for index, path in enumerate(paths, start=1):
+            self._render_breeding_path(index, path, gene_counts(path.final))
+        self.request_resize()
+
     def _finish_breed_calculation(self) -> None:
         self._breed_calculating = False
         if self._breed_calc_btn:
             self._breed_calc_btn.configure(state="normal", text="Calculate")
+        if self._breed_best_btn:
+            self._breed_best_btn.configure(state="normal", text="Найти лучший")
 
     def _apply_breeding_paths_result(
         self,
@@ -433,8 +563,15 @@ class GeneticsFeature(Feature):
             subtitle = format_gene_profile(target_counts)
         else:
             chance_label = f", {path.chance * 100:.0f}%" if path.chance < 0.9999 else ", 100%"
-            title = f"Вариант {index}: {path.final} ({path.step_count} скрещ.{chance_label})"
-            subtitle = f"Цель: {format_gene_profile(target_counts)}"
+            profile = format_gene_profile(target_counts)
+            title = (
+                f"Вариант {index}: {path.final} · {profile} "
+                f"({path.step_count} скрещ.{chance_label})"
+            )
+            final_step = path.steps[-1]
+            center = final_step.center or "без центра"
+            donors = " + ".join(final_step.crossbreeding)
+            subtitle = f"Финал: центр {center}, доноры {donors}"
 
         ctk.CTkLabel(
             card,
@@ -720,12 +857,13 @@ class GeneticsFeature(Feature):
         for widget in self._slots_frame.winfo_children():
             widget.destroy()
 
-        surrounding = (
-            normalize_genes(self._top_var.get() if self._top_var else ""),
-            normalize_genes(self._bottom_var.get() if self._bottom_var else ""),
-            normalize_genes(self._left_var.get() if self._left_var else ""),
-            normalize_genes(self._right_var.get() if self._right_var else ""),
+        raw_neighbors = (
+            ("Сверху", self._top_var.get() if self._top_var else ""),
+            ("Снизу", self._bottom_var.get() if self._bottom_var else ""),
+            ("Слева", self._left_var.get() if self._left_var else ""),
+            ("Справа", self._right_var.get() if self._right_var else ""),
         )
+        surrounding = tuple(value for _label, value in raw_neighbors)
         result, slots = calculate_crossbreed(
             self._center_var.get() if self._center_var else "",
             surrounding[0],
@@ -735,7 +873,7 @@ class GeneticsFeature(Feature):
         )
         center = normalize_genes(self._center_var.get() if self._center_var else "")
         planting_order = planting_order_for_planter(surrounding, slots)
-        neighbor_labels = ("Сверху", "Снизу", "Слева", "Справа")
+        donor_labels = [label for label, value in raw_neighbors if value.strip()]
 
         ctk.CTkLabel(
             self._result_frame,
@@ -751,9 +889,9 @@ class GeneticsFeature(Feature):
         ).pack(anchor="w", padx=12, pady=(0, 4))
 
         ordered_neighbors = [
-            f"{order}-й {neighbor_labels[index]}"
+            f"{order}-й {donor_labels[index]}"
             for index, order in enumerate(planting_order)
-            if order is not None and index < len(neighbor_labels) and surrounding[index]
+            if order is not None and index < len(donor_labels)
         ]
         if ordered_neighbors:
             ctk.CTkLabel(

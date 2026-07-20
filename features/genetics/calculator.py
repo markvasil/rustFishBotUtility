@@ -180,7 +180,12 @@ def crossbreed_combination(
     crossbreeding: Tuple[str, ...],
     source_pool: Tuple[str, ...],
 ) -> List[CrossbreedOutcome]:
-    """Модель скрещивания как на rustbreeder.com."""
+    """Модель скрещивания как на rustbreeder.com.
+
+    Важно: шанс считается отдельно для каждого центра (1 / число исходов
+    при этом центре), а не размазывается по всем центрам сразу. Иначе путь
+    вроде YYHXYH+YHYXYH → YGYXYH с центром XGYGXW получает ~10% вместо 100%.
+    """
     if len(crossbreeding) < 2:
         return []
 
@@ -193,28 +198,19 @@ def crossbreed_combination(
     outcomes: List[CrossbreedOutcome] = []
     donor_count = len(normalized_combo)
 
-    if _requires_center_check(crossbreeding, weights):
-        others = [gene for gene in normalized_pool if gene not in normalized_combo]
-        for center in others:
-            for partial in _build_crossbreed_results(weights, center):
-                outcomes.append(
-                    CrossbreedOutcome(
-                        result="".join(partial.genes),
-                        chance=0.0,
-                        center=center,
-                        crossbreeding=normalized_combo,
-                        planting_order=_planting_order_from_tie_winners(
-                            donor_count, partial.tie_winning_indexes
-                        ),
-                    )
-                )
-    else:
-        for partial in _build_crossbreed_results(weights):
+    def _append_partials(
+        partials: List[_PartialCrossbreedResult],
+        center: Optional[str],
+    ) -> None:
+        if not partials:
+            return
+        chance = 1.0 / len(partials)
+        for partial in partials:
             outcomes.append(
                 CrossbreedOutcome(
                     result="".join(partial.genes),
-                    chance=0.0,
-                    center=None,
+                    chance=chance,
+                    center=center,
                     crossbreeding=normalized_combo,
                     planting_order=_planting_order_from_tie_winners(
                         donor_count, partial.tie_winning_indexes
@@ -222,20 +218,14 @@ def crossbreed_combination(
                 )
             )
 
-    if not outcomes:
-        return []
+    if _requires_center_check(crossbreeding, weights):
+        others = [gene for gene in normalized_pool if gene not in normalized_combo]
+        for center in others:
+            _append_partials(_build_crossbreed_results(weights, center), center)
+    else:
+        _append_partials(_build_crossbreed_results(weights), None)
 
-    per_combo_chance = 1.0 / len(outcomes)
-    return [
-        CrossbreedOutcome(
-            result=item.result,
-            chance=per_combo_chance,
-            center=item.center,
-            crossbreeding=item.crossbreeding,
-            planting_order=item.planting_order,
-        )
-        for item in outcomes
-    ]
+    return outcomes
 
 
 def calculate_crossbreed(
@@ -245,14 +235,11 @@ def calculate_crossbreed(
     left: str = "",
     right: str = "",
 ) -> Tuple[str, List[SlotResult]]:
+    # Пустое поле = нет соседа, а не растение XXXXXX. Отдаём сырые строки —
+    # плантер сам отбросит пустые и нормализует только реальных доноров.
     result, slots, _chance = calculate_crossbreed_planter(
         center,
-        (
-            normalize_genes(top),
-            normalize_genes(bottom),
-            normalize_genes(left),
-            normalize_genes(right),
-        ),
+        (top, bottom, left, right),
     )
     return result, slots
 
@@ -262,7 +249,7 @@ def planting_order_for_planter(
     slots: List[SlotResult],
 ) -> Tuple[Optional[int], ...]:
     """Метки 1st/2nd для соседей грядки при ничьей (гайд rustbreeder Example 4)."""
-    neighbors = [normalize_genes(item) for item in surrounding if item]
+    neighbors = [normalize_genes(item) for item in surrounding if item and item.strip()]
     donor_count = len(neighbors)
     if donor_count == 0:
         return ()
@@ -279,7 +266,7 @@ def calculate_crossbreed_planter(
     surrounding: Tuple[str, ...],
 ) -> Tuple[str, List[SlotResult], float]:
     center_genes = normalize_genes(center)
-    neighbors = [normalize_genes(item) for item in surrounding if item]
+    neighbors = [normalize_genes(item) for item in surrounding if item and item.strip()]
 
     result_chars: List[str] = []
     slots: List[SlotResult] = []
@@ -322,13 +309,13 @@ def calculate_crossbreed_planter(
                 chance = 1.0 / len(winners)
                 explanation = f"Ничья {', '.join(winners)} — шанс {chance * 100:.0f}%"
                 tie_winners = tuple(contributors.get(winner, []))
-            result_chars.append(winner)
         else:
             winner = center_gene
             chance = 1.0
             explanation = f"Центр {center_w:.1f} >= доноры {max_vote:.1f}"
             tie_winners = ()
 
+        result_chars.append(winner)
         slots.append(
             SlotResult(
                 i + 1,

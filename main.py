@@ -57,11 +57,17 @@ def main() -> None:
     initial_overlay_pos = None
     if overlay_pos.get("x") is not None and overlay_pos.get("y") is not None:
         initial_overlay_pos = (int(overlay_pos["x"]), int(overlay_pos["y"]))
+    initial_overlay_size = None
+    if overlay_pos.get("w") is not None and overlay_pos.get("h") is not None:
+        initial_overlay_size = (int(overlay_pos["w"]), int(overlay_pos["h"]))
 
     overlay = OverlayWindow(
         [],
         initial_position=initial_overlay_pos,
-        on_position_changed=lambda x, y: session.update_feature("_overlay", x=x, y=y),
+        initial_size=initial_overlay_size,
+        on_geometry_changed=lambda x, y, w, h: session.update_feature(
+            "_overlay", x=x, y=y, w=w, h=h
+        ),
     )
 
     splash = StartupSplash(overlay.root)

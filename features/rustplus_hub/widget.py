@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 class RustPlusHubFeature(Feature):
     id = "rustplus"
     title = "Rust+ Live"
+    manages_own_scroll = True  # свой CTkTabview со скроллом внутри — без внешней обёртки
     MAP_PREVIEW_MAX = (560, 420)
     LIVE_SCROLL_HEIGHT = 380
     SERVER_ROW_HEIGHT = 54

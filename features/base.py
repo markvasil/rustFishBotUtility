@@ -11,6 +11,9 @@ class Feature(ABC):
 
     id: str
     title: str
+    # Если вкладка сама управляет прокруткой (свой CTkScrollableFrame/CTkTabview),
+    # оверлей НЕ оборачивает её в общий скролл — иначе получаются два слайдера.
+    manages_own_scroll: bool = False
 
     def __init__(self) -> None:
         self._request_resize: Optional[Callable[[], None]] = None

@@ -3,3 +3,4 @@ dist/
 *.spec.bak
 __pycache__/
 *.pyc
+123/

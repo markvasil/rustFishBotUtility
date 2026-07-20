@@ -78,8 +78,6 @@ def run_smoke() -> None:
     electricity._calculate()
     overlay.root.update_idletasks()
 
-    overlay.fit_to_content()
-    overlay.root.update_idletasks()
     overlay.toggle()
     overlay.root.update_idletasks()
     overlay.toggle()

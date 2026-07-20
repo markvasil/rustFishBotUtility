@@ -10,34 +10,54 @@ from overlay.toast import ToastManager
 
 
 class OverlayWindow:
-    """Полупрозрачное окно поверх игры с переключением по F5."""
+    """Полупрозрачное окно поверх игры с переключением по F5.
+
+    Размер окна фиксированный (тянется за уголок), а контент вкладок живёт
+    внутри прокручиваемого фрейма. Окно НЕ подгоняется под контент — это
+    убирает лаги при частой смене содержимого (например, во время сканирования).
+    """
 
     BG_COLOR = "#0d1117"
     ACCENT = "#e07a3a"
     SIDEBAR_WIDTH = 190
     TOP_BAR_HEIGHT = 44
-    MIN_WIDTH = 640
-    MIN_HEIGHT = 320
+    MIN_WIDTH = 760
+    MIN_HEIGHT = 360
+    DEFAULT_WIDTH = 820
+    DEFAULT_HEIGHT = 660
+    GRIP_SIZE = 18
 
     def __init__(
         self,
         features: Optional[List[Feature]] = None,
         *,
         initial_position: Optional[Tuple[int, int]] = None,
-        on_position_changed: Optional[Callable[[int, int], None]] = None,
+        initial_size: Optional[Tuple[int, int]] = None,
+        on_geometry_changed: Optional[Callable[[int, int, int, int], None]] = None,
     ) -> None:
         self._features: List[Feature] = []
         self._feature_map: Dict[str, Feature] = {}
         self._visible = False
         self._current_feature_id: Optional[str] = None
-        self._resize_job: Optional[str] = None
         self._nav_buttons: Dict[str, ctk.CTkButton] = {}
         self._feature_frames: Dict[str, ctk.CTkFrame] = {}
         self._nav_frame: Optional[ctk.CTkFrame] = None
         self._content: Optional[ctk.CTkFrame] = None
         self._saved_position = initial_position
-        self._on_position_changed = on_position_changed
+        self._on_geometry_changed = on_geometry_changed
+
+        self._width, self._height = self._clamp_size(
+            *(initial_size or (self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT))
+        )
+
+        # Перетаскивание и ресайз коалесируются: гоняем geometry один раз за
+        # цикл простоя, а не на каждое событие мыши (иначе слоёное окно лагает).
         self._drag_offset: Optional[Tuple[int, int]] = None
+        self._pending_pos: Optional[Tuple[int, int]] = None
+        self._move_job: Optional[str] = None
+        self._resize_origin: Optional[Tuple[int, int, int, int]] = None
+        self._pending_size: Optional[Tuple[int, int]] = None
+        self._resize_job: Optional[str] = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -49,14 +69,15 @@ class OverlayWindow:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.94)
-        self.root.resizable(False, False)
 
         self._build_shell()
         self._apply_windows_styles()
         if features:
             self.set_features(features)
-        self.fit_to_content()
+        self._apply_geometry()
         self.hide()
+
+    # ---- фичи ----------------------------------------------------------------
 
     def set_features(self, features: List[Feature]) -> None:
         self._features = features
@@ -97,7 +118,7 @@ class OverlayWindow:
 
         ctk.CTkLabel(
             bar_body,
-            text="F5 — оверлей   ·   F6 — выход   ·   шапка — перемещение",
+            text="F5 — оверлей   ·   F6 — выход   ·   шапка — перемещение   ·   уголок — размер",
             font=ctk.CTkFont(size=11),
             text_color="#6b7280",
             cursor="fleur",
@@ -127,6 +148,25 @@ class OverlayWindow:
         self._content = ctk.CTkFrame(body, fg_color=self.BG_COLOR, corner_radius=0)
         self._content.pack(side="left", fill="both", expand=True)
 
+        self._build_resize_grip()
+
+    def _build_resize_grip(self) -> None:
+        grip = ctk.CTkLabel(
+            self.root,
+            text="◢",
+            width=self.GRIP_SIZE,
+            height=self.GRIP_SIZE,
+            font=ctk.CTkFont(size=13),
+            text_color="#6b7280",
+            fg_color="transparent",
+            cursor="sizing",
+        )
+        grip.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
+        grip.lift()
+        grip.bind("<ButtonPress-1>", self._start_resize)
+        grip.bind("<B1-Motion>", self._on_resize)
+        grip.bind("<ButtonRelease-1>", self._end_resize)
+
     def _mount_features(self) -> None:
         assert self._nav_frame is not None and self._content is not None
 
@@ -155,54 +195,85 @@ class OverlayWindow:
             btn.pack(fill="x", padx=8, pady=2)
             self._nav_buttons[feature.id] = btn
 
-            frame = ctk.CTkFrame(self._content, fg_color=self.BG_COLOR)
-            feature.set_request_resize(self.fit_to_content)
+            # Вкладку с собственным скроллом (Rust+) не оборачиваем — иначе два
+            # слайдера. Остальные кладём в прокручиваемый фрейм: контент
+            # переполняется в скролл, окно не растёт. request_resize — пустышка.
+            if getattr(feature, "manages_own_scroll", False):
+                frame = ctk.CTkFrame(self._content, fg_color=self.BG_COLOR, corner_radius=0)
+            else:
+                frame = ctk.CTkScrollableFrame(self._content, fg_color=self.BG_COLOR, corner_radius=0)
+            feature.set_request_resize(self._noop_resize)
             feature.build(frame)
             self._feature_frames[feature.id] = frame
 
         if self._features:
             self._show_feature(self._features[0].id)
 
-    def fit_to_content(self) -> None:
-        if self._resize_job:
-            self.root.after_cancel(self._resize_job)
-        self._resize_job = self.root.after(0, self._apply_fit)
+    def _noop_resize(self) -> None:
+        # Окно фиксированного размера — подгонять под контент не нужно.
+        # Внутри вкладок работает скролл (CTkScrollableFrame).
+        pass
 
-    def _apply_fit(self) -> None:
-        self._resize_job = None
-        self.root.update_idletasks()
-
-        content_width = self.MIN_WIDTH - self.SIDEBAR_WIDTH
-        content_height = self.MIN_HEIGHT - self.TOP_BAR_HEIGHT
-
-        if self._nav_frame is not None:
-            self._nav_frame.update_idletasks()
-            content_height = max(content_height, self._nav_frame.winfo_reqheight())
+    def _show_feature(self, feature_id: str) -> None:
+        if feature_id == self._current_feature_id:
+            return
 
         if self._current_feature_id:
-            frame = self._feature_frames[self._current_feature_id]
-            frame.update_idletasks()
-            content_width = max(content_width, frame.winfo_reqwidth())
-            content_height = max(content_height, frame.winfo_reqheight())
+            prev = self._feature_map.get(self._current_feature_id)
+            if prev:
+                prev.on_hide()
+            prev_frame = self._feature_frames.get(self._current_feature_id)
+            if prev_frame:
+                prev_frame.pack_forget()
+            prev_btn = self._nav_buttons.get(self._current_feature_id)
+            if prev_btn:
+                prev_btn.configure(fg_color="transparent", border_width=0)
 
-        width = self.SIDEBAR_WIDTH + content_width
-        height = self.TOP_BAR_HEIGHT + content_height
+        self._current_feature_id = feature_id
+        frame = self._feature_frames[feature_id]
+        frame.pack(fill="both", expand=True)
+
+        btn = self._nav_buttons[feature_id]
+        btn.configure(fg_color="#2a3142", border_width=1, border_color="#e07a3a")
+
+        feature = self._feature_map[feature_id]
+        feature.on_show()
+
+    # ---- геометрия / размер --------------------------------------------------
+
+    def _clamp_size(self, width: int, height: int) -> Tuple[int, int]:
+        screen_w = self.root.winfo_screenwidth() if hasattr(self, "root") else 100000
+        screen_h = self.root.winfo_screenheight() if hasattr(self, "root") else 100000
+        width = max(self.MIN_WIDTH, min(int(width), screen_w))
+        height = max(self.MIN_HEIGHT, min(int(height), screen_h))
+        return width, height
+
+    def _apply_geometry(self) -> None:
+        self.root.update_idletasks()
+        self._width, self._height = self._clamp_size(self._width, self._height)
+        w, h = self._width, self._height
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        width = min(width, screen_w - 40)
-        height = min(height, screen_h - 40)
-
         if self._saved_position:
             x, y = self._saved_position
-            x = max(0, min(x, screen_w - width))
-            y = max(0, min(y, screen_h - height))
-            self._saved_position = (x, y)
+            x = max(0, min(x, screen_w - w))
+            y = max(0, min(y, screen_h - h))
         else:
-            x = (screen_w - width) // 2
-            y = (screen_h - height) // 2
+            x = (screen_w - w) // 2
+            y = (screen_h - h) // 2
+        self._saved_position = (x, y)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+    def _persist_geometry(self) -> None:
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        self._saved_position = (x, y)
+        self._width, self._height = w, h
+        if self._on_geometry_changed:
+            self._on_geometry_changed(x, y, w, h)
+
+    # ---- перетаскивание ------------------------------------------------------
 
     def _bind_drag(self, widget) -> None:
         widget.bind("<ButtonPress-1>", self._start_drag, add="+")
@@ -223,44 +294,69 @@ class OverlayWindow:
     def _on_drag(self, event) -> None:
         if self._drag_offset is None:
             return
-        x = event.x_root - self._drag_offset[0]
-        y = event.y_root - self._drag_offset[1]
+        self._pending_pos = (
+            event.x_root - self._drag_offset[0],
+            event.y_root - self._drag_offset[1],
+        )
+        if self._move_job is None:
+            self._move_job = self.root.after_idle(self._apply_move)
+
+    def _apply_move(self) -> None:
+        self._move_job = None
+        if self._pending_pos is None:
+            return
+        x, y = self._pending_pos
         self.root.geometry(f"+{x}+{y}")
 
     def _end_drag(self, _event) -> None:
         if self._drag_offset is None:
             return
         self._drag_offset = None
-        x, y = self.root.winfo_x(), self.root.winfo_y()
-        self._saved_position = (x, y)
-        if self._on_position_changed:
-            self._on_position_changed(x, y)
+        if self._move_job is not None:
+            self.root.after_cancel(self._move_job)
+            self._move_job = None
+        self._apply_move()
+        self._persist_geometry()
 
-    def _show_feature(self, feature_id: str) -> None:
-        if feature_id == self._current_feature_id:
+    # ---- ресайз за уголок ----------------------------------------------------
+
+    def _start_resize(self, event) -> None:
+        self._resize_origin = (
+            event.x_root,
+            event.y_root,
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+        )
+
+    def _on_resize(self, event) -> None:
+        if self._resize_origin is None:
             return
+        start_x, start_y, start_w, start_h = self._resize_origin
+        w = start_w + (event.x_root - start_x)
+        h = start_h + (event.y_root - start_y)
+        self._pending_size = self._clamp_size(w, h)
+        if self._resize_job is None:
+            self._resize_job = self.root.after_idle(self._apply_resize)
 
-        if self._current_feature_id:
-            prev = self._feature_map.get(self._current_feature_id)
-            if prev:
-                prev.on_hide()
-            prev_frame = self._feature_frames.get(self._current_feature_id)
-            if prev_frame:
-                prev_frame.pack_forget()
-            prev_btn = self._nav_buttons.get(self._current_feature_id)
-            if prev_btn:
-                prev_btn.configure(fg_color="transparent", border_width=0)
+    def _apply_resize(self) -> None:
+        self._resize_job = None
+        if self._pending_size is None:
+            return
+        w, h = self._pending_size
+        self._width, self._height = w, h
+        self.root.geometry(f"{w}x{h}")
 
-        self._current_feature_id = feature_id
-        frame = self._feature_frames[feature_id]
-        frame.pack(fill="x")
+    def _end_resize(self, _event) -> None:
+        if self._resize_origin is None:
+            return
+        self._resize_origin = None
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+            self._resize_job = None
+        self._apply_resize()
+        self._persist_geometry()
 
-        btn = self._nav_buttons[feature_id]
-        btn.configure(fg_color="#2a3142", border_width=1, border_color="#e07a3a")
-
-        feature = self._feature_map[feature_id]
-        feature.on_show()
-        self.fit_to_content()
+    # ---- окно ----------------------------------------------------------------
 
     def _apply_windows_styles(self) -> None:
         try:
@@ -279,7 +375,6 @@ class OverlayWindow:
 
     def show(self) -> None:
         self._visible = True
-        self.fit_to_content()
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
