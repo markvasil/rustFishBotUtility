@@ -69,7 +69,7 @@ def run_smoke() -> None:
 
     genetics = overlay.get_feature("genetics")
     assert genetics is not None
-    genetics._calculate()
+    assert genetics._collect_scanned_genes() == []
     overlay.root.update_idletasks()
 
     electricity = overlay.get_feature("electricity")

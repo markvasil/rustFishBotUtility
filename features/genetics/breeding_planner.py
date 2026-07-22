@@ -8,11 +8,19 @@ https://github.com/ryantheleach/rust-breeder
 from __future__ import annotations
 
 import itertools
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from features.genetics.calculator import crossbreed_combination, normalize_genes
+from features.genetics.calculator import (
+    _build_crossbreed_results,
+    _get_winning_crossbreeding_weights,
+    _planting_order_from_tie_winners,
+    _requires_center_check,
+    normalize_genes,
+)
 from features.shared_data import VALID_GENES
 
 # ---- дефолты как в Options.vue (DEFAULT_OPTIONS) ----
@@ -24,6 +32,19 @@ SAPLINGS_ADDED_BETWEEN_GENERATIONS = 20
 MIN_TRACKED_SCORE = 4.0
 MAPS_PER_GENE_LIMIT = 3  # appendAndOrganizeResults: slice(0, 3)
 GENE_SCORES: Dict[str, float] = {"G": 1.0, "Y": 1.0, "H": 0.5, "W": 0.0, "X": 0.0}
+# Параллелим только тяжёлые поколения (gen2+). Gen1 (~100k) быстрее в одном процессе:
+# на Windows старт ProcessPool съедает больше, чем даёт параллелизм.
+_PARALLEL_COMBO_THRESHOLD = 150_000
+_MAX_WORKERS = max(1, min(16, (os.cpu_count() or 4)))
+_PROCESS_POOL: Optional[ProcessPoolExecutor] = None
+
+
+def _get_process_pool() -> ProcessPoolExecutor:
+    global _PROCESS_POOL
+    if _PROCESS_POOL is None:
+        _PROCESS_POOL = ProcessPoolExecutor(max_workers=_MAX_WORKERS)
+    return _PROCESS_POOL
+
 
 
 @dataclass(frozen=True)
@@ -82,7 +103,6 @@ class _GeneticsMap:
     sum_of_composing_generations: int
     center: Optional[str] = None
     planting_order: Tuple[Optional[int], ...] = ()
-    # индексы в source-списке (для object-identity центров как у rustbreeder)
     crossbreeding_indexes: Tuple[int, ...] = ()
     center_index: Optional[int] = None
 
@@ -93,15 +113,28 @@ class _MapGroup:
     maps: List[_GeneticsMap] = field(default_factory=list)
 
 
+# Сырой результат воркера (pickle-friendly).
+_RawMap = Tuple[
+    str,  # result
+    Tuple[str, ...],  # donors
+    float,  # score
+    float,  # chance
+    int,  # composing
+    Optional[str],  # center
+    Tuple[Optional[int], ...],  # planting_order
+    Tuple[int, ...],  # donor indexes
+    Optional[int],  # center index
+]
+
+
 @lru_cache(maxsize=200_000)
-def _breed_combo_cached(
+def _weights_cached(
     crossbreeding: Tuple[str, ...],
-    source_pool: Tuple[str, ...],
-) -> Tuple[Tuple[str, Optional[str], float, Tuple[Optional[int], ...]], ...]:
-    outcomes = crossbreed_combination(crossbreeding, source_pool)
-    return tuple(
-        (item.result, item.center, item.chance, item.planting_order) for item in outcomes
-    )
+) -> Optional[Tuple[Tuple[Tuple[str, float, Tuple[int, ...]], ...], ...]]:
+    weights = _get_winning_crossbreeding_weights(crossbreeding)
+    if weights is None:
+        return None
+    return tuple(tuple(position) for position in weights)
 
 
 def parse_target_counts(values: Dict[str, int]) -> Tuple[Dict[str, int], Optional[str]]:
@@ -191,33 +224,63 @@ def _group_sort_key(group: _MapGroup, groups: Dict[str, _MapGroup], originals: S
     )
 
 
-def _collect_combos(
-    source: Sequence[_Sapling],
+def _comb(n: int, k: int) -> int:
+    if k < 0 or k > n:
+        return 0
+    k = min(k, n - k)
+    result = 1
+    for i in range(k):
+        result = result * (n - i) // (i + 1)
+    return result
+
+
+def _estimate_combo_count(n: int, mandatory_count: int, with_repetitions: bool = WITH_REPETITIONS) -> int:
+    """Грубая оценка числа комбинаций (для решения о параллели)."""
+    if n < MIN_CROSSBREEDING_SAPLINGS:
+        return 0
+    total = 0
+    max_size = min(MAX_CROSSBREEDING_SAPLINGS, n) if not with_repetitions else MAX_CROSSBREEDING_SAPLINGS
+    first_max = mandatory_count if mandatory_count else n
+    for size in range(MIN_CROSSBREEDING_SAPLINGS, max_size + 1):
+        for first in range(first_max):
+            rest = size - 1
+            available = n - first
+            if available <= 0:
+                continue
+            if with_repetitions:
+                if rest == 0:
+                    total += 1
+                else:
+                    total += _comb(available + rest - 1, rest)
+            else:
+                if rest > available - 1:
+                    continue
+                total += _comb(available - 1, rest)
+    return total
+
+
+def _iter_combos(
+    n: int,
     *,
     mandatory_count: int,
     with_repetitions: bool = WITH_REPETITIONS,
-) -> List[Tuple[int, ...]]:
-    """Комбинации индексов; при mandatory_count>0 каждая включает ≥1 из [0..mandatory)."""
-    n = len(source)
+) -> Iterable[Tuple[int, ...]]:
+    """Комбинации индексов без материализации всего списка (как setNextPosition)."""
     if n < MIN_CROSSBREEDING_SAPLINGS:
-        return []
-
-    combos: List[Tuple[int, ...]] = []
+        return
     max_size = min(MAX_CROSSBREEDING_SAPLINGS, n) if not with_repetitions else MAX_CROSSBREEDING_SAPLINGS
-    indexes = range(n)
+    first_max = mandatory_count if mandatory_count else n
     for size in range(MIN_CROSSBREEDING_SAPLINGS, max_size + 1):
-        if with_repetitions:
-            iterator = itertools.combinations_with_replacement(indexes, size)
-        else:
-            if size > n:
+        for first in range(first_max):
+            if size == 1:
+                yield (first,)
                 continue
-            iterator = itertools.combinations(indexes, size)
-        for combo in iterator:
-            if mandatory_count and combo[0] >= mandatory_count:
-                # у combinations(_with_replacement) первый индекс — минимальный
-                continue
-            combos.append(combo)
-    return combos
+            if with_repetitions:
+                for rest in itertools.combinations_with_replacement(range(first, n), size - 1):
+                    yield (first,) + rest
+            else:
+                for rest in itertools.combinations(range(first + 1, n), size - 1):
+                    yield (first,) + rest
 
 
 def _remember_map(groups: Dict[str, _MapGroup], item: _GeneticsMap) -> None:
@@ -225,9 +288,175 @@ def _remember_map(groups: Dict[str, _MapGroup], item: _GeneticsMap) -> None:
     if group is None:
         groups[item.result] = _MapGroup(item.result, [item])
         return
-    group.maps.append(item)
-    group.maps.sort(key=_map_sort_key)
-    del group.maps[MAPS_PER_GENE_LIMIT:]
+    maps = group.maps
+    key = _map_sort_key(item)
+    insert_at = len(maps)
+    for index, existing in enumerate(maps):
+        if key < _map_sort_key(existing):
+            insert_at = index
+            break
+    if insert_at >= MAPS_PER_GENE_LIMIT:
+        return
+    maps.insert(insert_at, item)
+    del maps[MAPS_PER_GENE_LIMIT:]
+
+
+def _evaluate_combo(
+    index_combo: Tuple[int, ...],
+    source_genes: Sequence[str],
+    source_gens: Sequence[int],
+    source_gene_set: Set[str],
+    unique_genes: Sequence[str],
+    gene_to_indexes: Dict[str, List[int]],
+    gene_scores: Dict[str, float],
+    minimum_tracked_score: float,
+) -> List[_RawMap]:
+    donors = tuple(source_genes[i] for i in index_combo)
+    weights_t = _weights_cached(donors)
+    if weights_t is None:
+        return []
+
+    # weights_t — tuple[tuple[...]]; calculator принимает и list, и tuple.
+    weights = weights_t
+    donor_count = len(donors)
+    out: List[_RawMap] = []
+
+    def emit(result: str, chance: float, center: Optional[str], planting: Tuple[Optional[int], ...]) -> None:
+        if result in source_gene_set:
+            return
+        score = round(sum(gene_scores.get(ch, 0.0) for ch in result), 2)
+        if score < minimum_tracked_score:
+            return
+        center_index: Optional[int] = None
+        if center is not None:
+            combo_indexes = set(index_combo)
+            for index in gene_to_indexes.get(center, ()):
+                if index not in combo_indexes:
+                    center_index = index
+                    break
+            if center_index is None:
+                return
+        composing = sum(source_gens[i] for i in index_combo)
+        if center_index is not None:
+            composing += source_gens[center_index]
+        out.append(
+            (
+                result,
+                donors,
+                score,
+                chance,
+                composing,
+                center,
+                planting,
+                index_combo,
+                center_index,
+            )
+        )
+
+    if _requires_center_check(donors, weights):  # type: ignore[arg-type]
+        donor_set = set(donors)
+        for center in unique_genes:
+            if center in donor_set:
+                continue
+            partials = _build_crossbreed_results(weights, center)  # type: ignore[arg-type]
+            if not partials:
+                continue
+            chance = 1.0 / len(partials)
+            for partial in partials:
+                emit(
+                    "".join(partial.genes),
+                    chance,
+                    center,
+                    _planting_order_from_tie_winners(donor_count, partial.tie_winning_indexes),
+                )
+    else:
+        if all(len(position) == 1 for position in weights):
+            result = "".join(position[0][0] for position in weights)
+            emit(result, 1.0, None, tuple(None for _ in range(donor_count)))
+        else:
+            partials = _build_crossbreed_results(weights, None)  # type: ignore[arg-type]
+            if not partials:
+                return out
+            chance = 1.0 / len(partials)
+            for partial in partials:
+                emit(
+                    "".join(partial.genes),
+                    chance,
+                    None,
+                    _planting_order_from_tie_winners(donor_count, partial.tie_winning_indexes),
+                )
+    return out
+
+
+def _worker_simulate_range(
+    payload: Tuple[
+        Tuple[str, ...],
+        Tuple[int, ...],
+        int,  # size
+        int,  # first
+        int,  # second_start inclusive
+        int,  # second_end exclusive
+        int,  # n
+        bool,  # with_repetitions
+        Dict[str, float],
+        float,
+    ],
+) -> List[_RawMap]:
+    (
+        source_genes,
+        source_gens,
+        size,
+        first,
+        second_start,
+        second_end,
+        n,
+        with_repetitions,
+        gene_scores,
+        minimum_tracked_score,
+    ) = payload
+    source_gene_set = set(source_genes)
+    unique_genes = list(dict.fromkeys(source_genes))
+    gene_to_indexes: Dict[str, List[int]] = {}
+    for index, gene in enumerate(source_genes):
+        gene_to_indexes.setdefault(gene, []).append(index)
+
+    results: List[_RawMap] = []
+
+    def handle(combo: Tuple[int, ...]) -> None:
+        results.extend(
+            _evaluate_combo(
+                combo,
+                source_genes,
+                source_gens,
+                source_gene_set,
+                unique_genes,
+                gene_to_indexes,
+                gene_scores,
+                minimum_tracked_score,
+            )
+        )
+
+    start = max(first, second_start)
+    end = min(n, second_end)
+    if size == 2:
+        for second in range(start, end):
+            if not with_repetitions and second <= first:
+                continue
+            handle((first, second))
+        return results
+
+    # size >= 3
+    rest_len = size - 2
+    for second in range(start, end):
+        if not with_repetitions and second <= first:
+            continue
+        if with_repetitions:
+            for rest in itertools.combinations_with_replacement(range(second, n), rest_len):
+                handle((first, second) + rest)
+        else:
+            for rest in itertools.combinations(range(second + 1, n), rest_len):
+                handle((first, second) + rest)
+    return results
 
 
 def _simulate_generation(
@@ -238,58 +467,114 @@ def _simulate_generation(
     gene_scores: Dict[str, float],
     minimum_tracked_score: float,
     groups: Dict[str, _MapGroup],
-) -> List[_GeneticsMap]:
+) -> None:
     """Один проход simulateCrossbreeding для текущего source."""
-    source_genes = [s.genes for s in source]
+    n = len(source)
+    if n < MIN_CROSSBREEDING_SAPLINGS:
+        return
+
+    source_genes = tuple(s.genes for s in source)
+    source_gens = tuple(s.generation_index for s in source)
     source_gene_set = set(source_genes)
-    pool_tuple = tuple(dict.fromkeys(source_genes))  # уникальные строки для центров/кэша
-    generation_maps: List[_GeneticsMap] = []
+    unique_genes = list(dict.fromkeys(source_genes))
+    gene_to_indexes: Dict[str, List[int]] = {}
+    for index, gene in enumerate(source_genes):
+        gene_to_indexes.setdefault(gene, []).append(index)
 
-    for index_combo in _collect_combos(source, mandatory_count=mandatory_count):
-        donors = tuple(source[i].genes for i in index_combo)
-        # object-identity: центр — любой sapling, чей объект НЕ в combo
-        combo_indexes = set(index_combo)
-        # outcomes через кэш по строкам (как crossbreed_combination)
-        for result, center, chance, planting_order in _breed_combo_cached(donors, pool_tuple):
-            # handlePotentialResultSaplings: не возвращать гены, уже есть в source
-            if result in source_gene_set:
-                continue
+    estimated = _estimate_combo_count(n, mandatory_count)
+    use_parallel = estimated >= _PARALLEL_COMBO_THRESHOLD and _MAX_WORKERS > 1
 
-            score = round(sum(gene_scores.get(ch, 0.0) for ch in result), 2)
-            if score < minimum_tracked_score:
-                continue
-
-            center_index: Optional[int] = None
-            if center is not None:
-                for i, sapling in enumerate(source):
-                    if i in combo_indexes:
-                        continue
-                    if sapling.genes == center:
-                        center_index = i
-                        break
-                if center_index is None:
-                    continue
-
-            composing = sum(source[i].generation_index for i in index_combo)
-            if center_index is not None:
-                composing += source[center_index].generation_index
-
-            item = _GeneticsMap(
-                result=result,
-                crossbreeding=donors,
-                score=score,
-                chance=chance,
-                generation_index=generation_index,
-                sum_of_composing_generations=composing,
-                center=center,
-                planting_order=planting_order,
-                crossbreeding_indexes=index_combo,
-                center_index=center_index,
+    def absorb(raw_maps: List[_RawMap]) -> None:
+        for raw in raw_maps:
+            (
+                result,
+                donors,
+                score,
+                chance,
+                composing,
+                center,
+                planting,
+                indexes,
+                center_index,
+            ) = raw
+            _remember_map(
+                groups,
+                _GeneticsMap(
+                    result=result,
+                    crossbreeding=donors,
+                    score=score,
+                    chance=chance,
+                    generation_index=generation_index,
+                    sum_of_composing_generations=composing,
+                    center=center,
+                    planting_order=planting,
+                    crossbreeding_indexes=indexes,
+                    center_index=center_index,
+                ),
             )
-            generation_maps.append(item)
-            _remember_map(groups, item)
 
-    return generation_maps
+    if not use_parallel:
+        for combo in _iter_combos(n, mandatory_count=mandatory_count):
+            absorb(
+                _evaluate_combo(
+                    combo,
+                    source_genes,
+                    source_gens,
+                    source_gene_set,
+                    unique_genes,
+                    gene_to_indexes,
+                    gene_scores,
+                    minimum_tracked_score,
+                )
+            )
+        return
+
+    max_size = (
+        min(MAX_CROSSBREEDING_SAPLINGS, n) if not WITH_REPETITIONS else MAX_CROSSBREEDING_SAPLINGS
+    )
+    first_max = mandatory_count if mandatory_count else n
+    payloads: List[
+        Tuple[Tuple[str, ...], Tuple[int, ...], int, int, int, int, int, bool, Dict[str, float], float]
+    ] = []
+
+    # Режем по (size, first, second-диапазон), чтобы тяжёлые first=0 не висели в одном воркере.
+    for size in range(MIN_CROSSBREEDING_SAPLINGS, max_size + 1):
+        for first in range(first_max):
+            second_lo = first
+            second_hi = n
+            span = max(1, second_hi - second_lo)
+            if WITH_REPETITIONS:
+                work = _comb((n - first) + (size - 1) - 1, size - 1) if size > 1 else 1
+            else:
+                work = _comb(n - first - 1, size - 1) if size > 1 else 1
+            work_per_piece = max(8_000, estimated // max(1, _MAX_WORKERS * 4))
+            pieces = max(1, min(span, (work + work_per_piece - 1) // work_per_piece))
+            piece = max(1, (span + pieces - 1) // pieces)
+            for sec_start in range(second_lo, second_hi, piece):
+                sec_end = min(second_hi, sec_start + piece)
+                payloads.append(
+                    (
+                        source_genes,
+                        source_gens,
+                        size,
+                        first,
+                        sec_start,
+                        sec_end,
+                        n,
+                        WITH_REPETITIONS,
+                        gene_scores,
+                        minimum_tracked_score,
+                    )
+                )
+
+    try:
+        pool = _get_process_pool()
+        futures = [pool.submit(_worker_simulate_range, payload) for payload in payloads]
+        for future in as_completed(futures):
+            absorb(future.result())
+    except Exception:
+        for payload in payloads:
+            absorb(_worker_simulate_range(payload))
 
 
 def _best_saplings_for_next_generation(
@@ -345,8 +630,13 @@ def simulate_best_genetics(
     gene_scores: Optional[Dict[str, float]] = None,
     minimum_tracked_score: float = MIN_TRACKED_SCORE,
     saplings_added: int = SAPLINGS_ADDED_BETWEEN_GENERATIONS,
+    stop_at_max_score: bool = False,
 ) -> Tuple[Dict[str, _MapGroup], Set[str]]:
-    """Полный прогон как CrossbreedingOrchestrator.simulateBestGenetics."""
+    """Полный прогон как CrossbreedingOrchestrator.simulateBestGenetics.
+
+    stop_at_max_score: для «Найти лучший» — не считать следующие поколения,
+    если уже есть результат с максимальным возможным score.
+    """
     originals = _unique_pool(available)
     if not originals:
         return {}, set()
@@ -356,9 +646,9 @@ def simulate_best_genetics(
     source = [_Sapling(gene, 0) for gene in originals]
     groups: Dict[str, _MapGroup] = {}
     original_set = set(originals)
+    max_possible_score = round(6.0 * max(scores.values()) if scores else 6.0, 2)
 
     for generation_index in range(1, generation_limit + 1):
-        # added saplings стоят в начале source (как [...additional, ...prev])
         mandatory = 0
         if generation_index > 1:
             for sapling in source:
@@ -376,6 +666,11 @@ def simulate_best_genetics(
             groups=groups,
         )
 
+        if stop_at_max_score and groups:
+            best = max((group.maps[0].score for group in groups.values() if group.maps), default=0.0)
+            if best + 1e-9 >= max_possible_score:
+                break
+
         if generation_index >= generation_limit:
             break
 
@@ -388,7 +683,6 @@ def simulate_best_genetics(
         )
         if not additional:
             break
-        # nextGenerationSourceGenes = [...additional, ...source]
         source = additional + source
 
     return groups, original_set
@@ -451,7 +745,6 @@ def _paths_from_groups(
     """Строит лучший путь к каждому гену из map groups (linkGenerationTree упрощённо)."""
     paths_to: Dict[str, List[BreedStep]] = {gene: [] for gene in originals}
 
-    # поколения по возрастанию, чтобы родители были готовы
     ordered = sorted(
         groups.values(),
         key=lambda group: (group.maps[0].generation_index if group.maps else 99, group.gene),
@@ -473,7 +766,6 @@ def _paths_from_groups(
         bred = [gene for gene in parents if gene not in originals]
         base = _merge_prerequisite_paths(bred, originals, paths_to)
         if base is None:
-            # родитель ещё не в paths_to — попробуем только из originals
             if not all(gene in originals or gene in paths_to for gene in parents):
                 continue
             base = _merge_prerequisite_paths(bred, originals, paths_to)
@@ -552,7 +844,7 @@ def find_breeding_paths(
             if path is None:
                 continue
             matched.append(path)
-            break  # один лучший путь на ген
+            break
         if len(matched) >= max_paths:
             break
 
@@ -576,7 +868,11 @@ def find_best_plant(
         return [], "Сначала отсканируйте или введите гены"
 
     generation_limit = max_steps if max_steps is not None else DEFAULT_MAX_STEPS
-    groups, originals = simulate_best_genetics(pool, max_generations=generation_limit)
+    groups, originals = simulate_best_genetics(
+        pool,
+        max_generations=generation_limit,
+        stop_at_max_score=True,
+    )
     if not groups:
         return [], "Не удалось ничего вывести из этих генов"
 
@@ -592,7 +888,6 @@ def find_best_plant(
             break
         path = _breeding_path_from_map(group.maps[0], paths_to, originals)
         if path is None:
-            # ген из исходного пула
             if group.gene in originals:
                 path = BreedingPath([], group.gene, 1.0)
             else:

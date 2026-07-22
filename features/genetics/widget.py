@@ -16,11 +16,7 @@ from features.genetics.breeding_planner import (
     parse_target_counts,
     _sapling_score,
 )
-from features.genetics.calculator import (
-    calculate_crossbreed,
-    normalize_genes,
-    planting_order_for_planter,
-)
+from features.genetics.calculator import normalize_genes
 from features.genetics.scanner import GeneScanner
 from storage.session import SessionStore
 
@@ -39,13 +35,6 @@ class GeneticsFeature(Feature):
         self._scan_btn: Optional[ctk.CTkButton] = None
         self._known_genes: Set[str] = set()
 
-        self._center_var: Optional[ctk.StringVar] = None
-        self._top_var: Optional[ctk.StringVar] = None
-        self._bottom_var: Optional[ctk.StringVar] = None
-        self._left_var: Optional[ctk.StringVar] = None
-        self._right_var: Optional[ctk.StringVar] = None
-        self._result_frame: Optional[ctk.CTkFrame] = None
-        self._slots_frame: Optional[ctk.CTkFrame] = None
         self._target_vars: Dict[str, ctk.StringVar] = {}
         self._target_sum_var: Optional[ctk.StringVar] = None
         self._breed_paths_frame: Optional[ctk.CTkScrollableFrame] = None
@@ -61,7 +50,7 @@ class GeneticsFeature(Feature):
 
         ctk.CTkLabel(
             parent,
-            text="Сканируйте гены кликом ЛКМ в Rust и считайте кроссбридинг (как на rustbreeder.com)",
+            text="Сканируйте гены кликом ЛКМ в Rust и планируйте выведение (как на rustbreeder.com)",
             font=ctk.CTkFont(size=13),
             text_color="#a0a8b8",
         ).pack(anchor="w", padx=12, pady=(12, 8))
@@ -69,14 +58,12 @@ class GeneticsFeature(Feature):
         self._build_scanner_section(parent)
         self._build_gene_list_section(parent)
         self._build_breeding_planner_section(parent)
-        self._build_crossbreed_section(parent)
 
         self._scanner = GeneScanner(
             on_gene_found=self._schedule_gene_found,
             on_status=self._schedule_status,
         )
         self._update_target_sum_label()
-        self._calculate()
 
     def _build_scanner_section(self, parent: ctk.CTkFrame) -> None:
         scan_frame = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
@@ -130,7 +117,7 @@ class GeneticsFeature(Feature):
         ).pack(side="left")
         ctk.CTkLabel(
             header,
-            text="(клик → центр, Ctrl+C или кнопка → копировать)",
+            text="(клик → копировать строку, Ctrl+C или кнопка → всё)",
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
         ).pack(side="left", padx=(8, 0))
@@ -148,14 +135,11 @@ class GeneticsFeature(Feature):
         self._genes_text.pack(fill="x", padx=10, pady=(0, 10))
         self._genes_text.bind("<Button-1>", self._on_gene_click)
         self._genes_text.bind("<KeyRelease>", self._sync_known_genes)
-        # Ctrl+C / Ctrl+V ловим по ФИЗИЧЕСКОЙ клавише (keycode), а не по букве:
-        # при русской раскладке keysym = кириллица (м/с), и обычные <Control-v>/<Control-c>
-        # (как и встроенная вставка Tkinter) не срабатывают.
         self._genes_text.bind("<Control-KeyPress>", self._on_genes_ctrl_key)
 
     def _build_breeding_planner_section(self, parent: ctk.CTkFrame) -> None:
         section = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
-        section.pack(fill="x", padx=12, pady=(0, 8))
+        section.pack(fill="x", padx=12, pady=(0, 12))
 
         header = ctk.CTkFrame(section, fg_color="transparent")
         header.pack(fill="x", padx=10, pady=(10, 4))
@@ -303,9 +287,9 @@ class GeneticsFeature(Feature):
     def _on_genes_ctrl_key(self, event=None) -> Optional[str]:
         keycode = getattr(event, "keycode", None)
         keysym = (getattr(event, "keysym", "") or "").lower()
-        if keycode == 86 or keysym in ("v", "cyrillic_em", "м"):  # физическая V
+        if keycode == 86 or keysym in ("v", "cyrillic_em", "м"):
             return self._paste_into_genes(event)
-        if keycode == 67 or keysym in ("c", "cyrillic_es", "с"):  # физическая C
+        if keycode == 67 or keysym in ("c", "cyrillic_es", "с"):
             return self._copy_genes_selection(event)
         return None
 
@@ -683,81 +667,6 @@ class GeneticsFeature(Feature):
             ).pack(anchor="w", padx=8, pady=(0, 8))
             available_genes.add(step.result)
 
-        ctk.CTkButton(
-            card,
-            text="Подставить в кроссбридинг",
-            width=180,
-            height=24,
-            fg_color="#374151",
-            hover_color="#4b5563",
-            command=lambda p=path: self._apply_breeding_path(p),
-        ).pack(anchor="w", padx=10, pady=(2, 8))
-
-    def _apply_breeding_path(self, path: BreedingPath) -> None:
-        if not path.steps:
-            if self._center_var:
-                self._center_var.set(path.final)
-            self._calculate()
-            return
-
-        last = path.steps[-1]
-        if self._center_var:
-            self._center_var.set(last.center or last.result)
-        if self._top_var:
-            self._top_var.set(last.top)
-        if self._bottom_var:
-            self._bottom_var.set(last.bottom)
-        if self._left_var:
-            self._left_var.set(last.left)
-        if self._right_var:
-            self._right_var.set(last.right)
-        self._calculate()
-
-    def _build_crossbreed_section(self, parent: ctk.CTkFrame) -> None:
-        ctk.CTkLabel(
-            parent,
-            text="Кроссбридинг: центр + 4 соседа (G/Y/H=0.6, W/X=1.0)",
-            font=ctk.CTkFont(size=12),
-            text_color="#a0a8b8",
-        ).pack(anchor="w", padx=12, pady=(0, 6))
-
-        self._center_var = ctk.StringVar(value="GYHWWX")
-        self._top_var = ctk.StringVar(value="GGYYXX")
-        self._bottom_var = ctk.StringVar(value="GGYYXX")
-        self._left_var = ctk.StringVar(value="GGYYXX")
-        self._right_var = ctk.StringVar(value="GGYYXX")
-
-        form = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
-        form.pack(fill="x", padx=12, pady=(0, 8))
-
-        grid = ctk.CTkFrame(form, fg_color="transparent")
-        grid.pack(padx=20, pady=12)
-
-        def cell(text: str, var: ctk.StringVar, r: int, c: int) -> None:
-            frame = ctk.CTkFrame(grid, fg_color="transparent")
-            frame.grid(row=r, column=c, padx=6, pady=4)
-            ctk.CTkLabel(frame, text=text, font=ctk.CTkFont(size=11), text_color="#8b93a7").pack()
-            ctk.CTkEntry(frame, textvariable=var, width=100).pack()
-
-        cell("Сверху", self._top_var, 0, 1)
-        cell("Слева", self._left_var, 1, 0)
-        cell("Центр", self._center_var, 1, 1)
-        cell("Справа", self._right_var, 1, 2)
-        cell("Снизу", self._bottom_var, 2, 1)
-
-        ctk.CTkButton(
-            form,
-            text="Рассчитать",
-            width=140,
-            fg_color="#c45c26",
-            command=self._calculate,
-        ).pack(pady=(0, 10))
-
-        self._result_frame = ctk.CTkFrame(parent, fg_color="#1a2030", corner_radius=8)
-        self._result_frame.pack(fill="x", padx=12, pady=(0, 8))
-        self._slots_frame = ctk.CTkFrame(parent, fg_color="#10151f", corner_radius=6)
-        self._slots_frame.pack(fill="x", padx=12, pady=(0, 12))
-
     def _toggle_scan(self) -> None:
         if not self._scanner:
             return
@@ -839,89 +748,17 @@ class GeneticsFeature(Feature):
         }
 
     def _on_gene_click(self, event) -> None:
-        if not self._genes_text or not self._center_var:
+        if not self._genes_text or not self._root:
             return
         index = self._genes_text.index(f"@{event.x},{event.y}")
         line_no = index.split(".")[0]
         line = self._genes_text.get(f"{line_no}.0", f"{line_no}.end").strip()
         if not line:
             return
-        self._center_var.set(normalize_genes(line))
-        self._calculate()
-
-    def _calculate(self) -> None:
-        if not self._result_frame or not self._slots_frame:
-            return
-        for widget in self._result_frame.winfo_children():
-            widget.destroy()
-        for widget in self._slots_frame.winfo_children():
-            widget.destroy()
-
-        raw_neighbors = (
-            ("Сверху", self._top_var.get() if self._top_var else ""),
-            ("Снизу", self._bottom_var.get() if self._bottom_var else ""),
-            ("Слева", self._left_var.get() if self._left_var else ""),
-            ("Справа", self._right_var.get() if self._right_var else ""),
-        )
-        surrounding = tuple(value for _label, value in raw_neighbors)
-        result, slots = calculate_crossbreed(
-            self._center_var.get() if self._center_var else "",
-            surrounding[0],
-            surrounding[1],
-            surrounding[2],
-            surrounding[3],
-        )
-        center = normalize_genes(self._center_var.get() if self._center_var else "")
-        planting_order = planting_order_for_planter(surrounding, slots)
-        donor_labels = [label for label, value in raw_neighbors if value.strip()]
-
-        ctk.CTkLabel(
-            self._result_frame,
-            text=f"Результат: {result}",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color="#6ec1e4",
-        ).pack(anchor="w", padx=12, pady=(10, 2))
-        ctk.CTkLabel(
-            self._result_frame,
-            text=f"Было: {center}",
-            font=ctk.CTkFont(size=12),
-            text_color="#9aa3b5",
-        ).pack(anchor="w", padx=12, pady=(0, 4))
-
-        ordered_neighbors = [
-            f"{order}-й {donor_labels[index]}"
-            for index, order in enumerate(planting_order)
-            if order is not None and index < len(donor_labels)
-        ]
-        if ordered_neighbors:
-            ctk.CTkLabel(
-                self._result_frame,
-                text=(
-                    "Порядок посадки при ничьей: сначала "
-                    + ", затем ".join(ordered_neighbors)
-                    + ", потом остальные (слот не важен)."
-                ),
-                font=ctk.CTkFont(size=11),
-                text_color="#f4a261",
-                wraplength=540,
-                justify="left",
-            ).pack(anchor="w", padx=12, pady=(0, 10))
-        else:
-            ctk.CTkLabel(self._result_frame, text="", height=6).pack()
-
-        for slot in slots:
-            row = ctk.CTkFrame(self._slots_frame, fg_color="#161c2a", corner_radius=4)
-            row.pack(fill="x", pady=2)
-            changed = "→" if slot.center_gene != slot.result_gene else "="
-            text = f"Слот {slot.index}: {slot.center_gene} {changed} {slot.result_gene}  |  {slot.explanation}"
-            ctk.CTkLabel(
-                row,
-                text=text,
-                anchor="w",
-                font=ctk.CTkFont(size=11),
-                text_color="#d1d7e3",
-            ).pack(padx=8, pady=5)
-        self.request_resize()
+        self._root.clipboard_clear()
+        self._root.clipboard_append(normalize_genes(line))
+        self._root.update()
+        self._set_status(f"Скопировано: {normalize_genes(line)}")
 
     def on_hide(self) -> None:
         if self._scanner and self._scanner.is_running:

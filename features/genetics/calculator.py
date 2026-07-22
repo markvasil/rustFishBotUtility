@@ -71,39 +71,40 @@ def _get_winning_crossbreeding_weights(
     crossbreeding: Tuple[str, ...],
 ) -> Optional[List[List[Tuple[str, float, Tuple[int, ...]]]]]:
     """Возвращает победителей по каждому слоту или None, если комбинация отбрасывается."""
-    normalized = tuple(normalize_genes(item) for item in crossbreeding)
+    n = len(crossbreeding)
+    if n < 2:
+        return None
+    # Уже нормализованные строки; лишний normalize_genes здесь слишком дорог.
     all_positions: List[List[Tuple[str, float, Tuple[int, ...]]]] = []
-    contributed: set[int] = set()
+    contributed = 0
     early_ties = 0
+    all_mask = (1 << n) - 1
 
     for position in range(6):
-        details: Dict[str, List[float | List[int]]] = {}
-        for index, sapling in enumerate(normalized):
+        scores: Dict[str, float] = {}
+        masks: Dict[str, int] = {}
+        for index, sapling in enumerate(crossbreeding):
             gene = sapling[position]
-            if gene not in details:
-                details[gene] = [0.0, []]
-            details[gene][0] = float(details[gene][0]) + _weight(gene)
-            contributors = details[gene][1]
-            assert isinstance(contributors, list)
-            contributors.append(index)
+            scores[gene] = scores.get(gene, 0.0) + GENE_WEIGHTS.get(gene, 0.0)
+            masks[gene] = masks.get(gene, 0) | (1 << index)
 
-        max_vote = max(float(value[0]) for value in details.values())
-        winners = [
-            (gene, float(value[0]), tuple(value[1]))
-            for gene, value in details.items()
-            if abs(float(value[0]) - max_vote) < 1e-9
-        ]
+        max_vote = max(scores.values())
+        winners: List[Tuple[str, float, Tuple[int, ...]]] = []
+        for gene, vote in scores.items():
+            if abs(vote - max_vote) >= 1e-9:
+                continue
+            mask = masks[gene]
+            winners.append((gene, vote, tuple(i for i in range(n) if mask & (1 << i))))
+            contributed |= mask
 
         if len(winners) > 1 and max_vote > RED_GENE_WEIGHT:
             early_ties += 1
-        if early_ties > 1:
-            return None
+            if early_ties > 1:
+                return None
 
         all_positions.append(winners)
-        for _, _, indexes in winners:
-            contributed.update(indexes)
 
-    if len(contributed) != len(normalized):
+    if contributed != all_mask:
         return None
     return all_positions
 
@@ -189,12 +190,13 @@ def crossbreed_combination(
     if len(crossbreeding) < 2:
         return []
 
-    weights = _get_winning_crossbreeding_weights(crossbreeding)
+    normalized_pool = tuple(normalize_genes(item) for item in source_pool)
+    normalized_combo = tuple(normalize_genes(item) for item in crossbreeding)
+
+    weights = _get_winning_crossbreeding_weights(normalized_combo)
     if weights is None:
         return []
 
-    normalized_pool = tuple(normalize_genes(item) for item in source_pool)
-    normalized_combo = tuple(normalize_genes(item) for item in crossbreeding)
     outcomes: List[CrossbreedOutcome] = []
     donor_count = len(normalized_combo)
 
@@ -218,7 +220,7 @@ def crossbreed_combination(
                 )
             )
 
-    if _requires_center_check(crossbreeding, weights):
+    if _requires_center_check(normalized_combo, weights):
         others = [gene for gene in normalized_pool if gene not in normalized_combo]
         for center in others:
             _append_partials(_build_crossbreed_results(weights, center), center)
