@@ -185,7 +185,7 @@ class RustPlusService:
             self._auto_connect_timer.cancel()
             self._auto_connect_timer = None
         if self.connection.connected_server and self.connection.connected_server.id == server_id:
-            self.connection.disconnect()
+            self.disconnect_server()
         for device in self.store.list_devices(server_id):
             self.store.remove_device(device.id)
         for camera in self.store.list_cameras(server_id):
@@ -196,7 +196,11 @@ class RustPlusService:
         self.connection.connect(server)
 
     def disconnect_server(self) -> None:
+        if self._auto_connect_timer:
+            self._auto_connect_timer.cancel()
+            self._auto_connect_timer = None
         self.connection.disconnect()
+        self.store.set_active_server_id(None)
 
     def fetch_map(self) -> None:
         self.connection.fetch_map()

@@ -302,7 +302,7 @@ class RustPlusHubFeature(Feature):
             scrollbar_button_color=Theme.BORDER,
         )
         self._servers_frame.pack(fill="both", expand=True, padx=2, pady=2)
-        hint_label(servers_card, "Connect работает только когда вы онлайн на сервере в игре.")
+        hint_label(servers_card, "Connect — только когда вы онлайн на сервере. «Отключить» — разрыв сессии. ✕ — удалить из списка.")
         ctk.CTkFrame(servers_card, fg_color="transparent", height=4).pack()
 
         manual_toggle = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -3169,6 +3169,12 @@ class RustPlusHubFeature(Feature):
             self._servers_outer.configure(height=height)
             self._servers_outer.pack_propagate(False)
 
+    def _invalidate_rust_panel_signatures(self) -> None:
+        self._servers_panel_signature = None
+        self._devices_panel_signature = None
+        self._cameras_panel_signature = None
+        self._groups_panel_signature = None
+
     def _refresh_servers(self) -> None:
         if not self._servers_frame:
             return
@@ -3211,19 +3217,19 @@ class RustPlusHubFeature(Feature):
         row.pack(fill="x", pady=1)
         row.pack_propagate(False)
 
-        actions = ctk.CTkFrame(row, fg_color="transparent", width=112)
+        actions = ctk.CTkFrame(row, fg_color="transparent", width=156)
         actions.pack(side="right", padx=6, pady=6)
         actions.pack_propagate(False)
         btn_danger(
             actions, "✕", lambda sid=server.id: self._remove_server(sid), width=28, height=28,
         ).pack(side="right", padx=(4, 0))
         if is_active:
-            ctk.CTkLabel(
+            btn_secondary(
                 actions,
-                text="Online",
-                font=ctk.CTkFont(size=9, weight="bold"),
-                text_color=Theme.SUCCESS,
-                width=52,
+                "Отключить",
+                lambda sid=server.id: self._disconnect_server(sid),
+                width=88,
+                height=28,
             ).pack(side="right", padx=(0, 4))
         else:
             connect_busy = BusyButton(
@@ -3291,15 +3297,37 @@ class RustPlusHubFeature(Feature):
         self._refresh_servers()
         self._set_status("Таймаут подключения. Попробуйте ещё раз.", error=True)
 
+    def _disconnect_server(self, server_id: str) -> None:
+        active = self._service.connection.connected_server
+        if not active or active.id != server_id:
+            return
+        server = self._service.store.get_server(server_id)
+        name = server.name if server else "сервер"
+        self._service.disconnect_server()
+        self._invalidate_rust_panel_signatures()
+        self._end_connect()
+        self._refresh_servers()
+        self._refresh_status()
+        self._set_status(f"Отключено от {name}")
+
     def _remove_server(self, server_id: str) -> None:
         name = self._service.store.get_server(server_id)
+        was_connected = bool(
+            self._service.connection.connected_server
+            and self._service.connection.connected_server.id == server_id
+        )
         self._service.remove_server(server_id)
+        self._invalidate_rust_panel_signatures()
+        self._end_connect()
         self._refresh_servers()
         self._refresh_status()
         self._refresh_devices_panel()
         self._refresh_cameras_panel()
         removed = name.name if name else "сервер"
-        self._set_status(f"Удалён: {removed}")
+        if was_connected:
+            self._set_status(f"Удалён и отключён: {removed}")
+        else:
+            self._set_status(f"Удалён: {removed}")
 
     def _send_chat(self) -> None:
         if not self._chat_input:
@@ -3381,6 +3409,8 @@ class RustPlusHubFeature(Feature):
             self._fetch_map_action()
         elif event.type == EventType.DISCONNECTED:
             self._end_connect()
+            self._invalidate_rust_panel_signatures()
+            self._refresh_servers()
             self._refresh_status()
             self._vendors_cache = []
             self._vendor_page = 0
