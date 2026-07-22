@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import customtkinter as ctk
 
 from features.base import Feature
+from overlay.smooth_scroll import SmoothScrollableFrame
 from overlay.toast import ToastManager
 
 
@@ -201,9 +202,13 @@ class OverlayWindow:
             if getattr(feature, "manages_own_scroll", False):
                 frame = ctk.CTkFrame(self._content, fg_color=self.BG_COLOR, corner_radius=0)
             else:
-                frame = ctk.CTkScrollableFrame(self._content, fg_color=self.BG_COLOR, corner_radius=0)
+                frame = SmoothScrollableFrame(self._content, fg_color=self.BG_COLOR, corner_radius=0)
             feature.set_request_resize(self._noop_resize)
             feature.build(frame)
+            # place + lift: все вкладки уже в дереве и перекрывают друг друга,
+            # без pack_forget/pack (он лагал на тяжёлых вкладках вроде Rust+).
+            frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            frame.lower()
             self._feature_frames[feature.id] = frame
 
         if self._features:
@@ -211,33 +216,33 @@ class OverlayWindow:
 
     def _noop_resize(self) -> None:
         # Окно фиксированного размера — подгонять под контент не нужно.
-        # Внутри вкладок работает скролл (CTkScrollableFrame).
+        # Внутри вкладок работает скролл (SmoothScrollableFrame).
         pass
 
     def _show_feature(self, feature_id: str) -> None:
         if feature_id == self._current_feature_id:
             return
 
-        if self._current_feature_id:
-            prev = self._feature_map.get(self._current_feature_id)
-            if prev:
-                prev.on_hide()
-            prev_frame = self._feature_frames.get(self._current_feature_id)
-            if prev_frame:
-                prev_frame.pack_forget()
-            prev_btn = self._nav_buttons.get(self._current_feature_id)
-            if prev_btn:
-                prev_btn.configure(fg_color="transparent", border_width=0)
+        prev_id = self._current_feature_id
 
-        self._current_feature_id = feature_id
         frame = self._feature_frames[feature_id]
-        frame.pack(fill="both", expand=True)
+        frame.lift()
 
         btn = self._nav_buttons[feature_id]
         btn.configure(fg_color="#2a3142", border_width=1, border_color="#e07a3a")
 
+        if prev_id:
+            prev_btn = self._nav_buttons.get(prev_id)
+            if prev_btn:
+                prev_btn.configure(fg_color="transparent", border_width=0)
+            prev = self._feature_map.get(prev_id)
+            if prev:
+                prev.on_hide()
+
+        self._current_feature_id = feature_id
         feature = self._feature_map[feature_id]
-        feature.on_show()
+        # Тяжёлый on_show (особенно Rust+) — после отрисовки вкладки.
+        self.root.after_idle(feature.on_show)
 
     # ---- геометрия / размер --------------------------------------------------
 
@@ -378,7 +383,7 @@ class OverlayWindow:
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
-        self.root.focus_force()
+        self.root.after_idle(self.root.focus_force)
 
     def hide(self) -> None:
         self._visible = False

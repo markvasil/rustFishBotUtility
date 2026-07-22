@@ -41,6 +41,8 @@ class MinimapWindow:
         self._saved_position = initial_position
         self._on_position_changed = on_position_changed
         self._drag_offset: Optional[tuple[int, int]] = None
+        self._pending_pos: Optional[tuple[int, int]] = None
+        self._move_job: Optional[str] = None
         self._renderer = renderer or MapRenderer()
         self._render_job: Optional[str] = None
         self._motion_tick_job: Optional[str] = None
@@ -184,6 +186,13 @@ class MinimapWindow:
     def hide(self) -> None:
         self._visible = False
         self._drag_offset = None
+        self._pending_pos = None
+        if self._move_job is not None:
+            try:
+                self._root.after_cancel(self._move_job)
+            except Exception:
+                pass
+            self._move_job = None
         self._stop_motion_tick()
         if self._render_job:
             self._root.after_cancel(self._render_job)
@@ -194,6 +203,13 @@ class MinimapWindow:
     def destroy(self) -> None:
         self._visible = False
         self._drag_offset = None
+        self._pending_pos = None
+        if self._move_job is not None:
+            try:
+                self._root.after_cancel(self._move_job)
+            except Exception:
+                pass
+            self._move_job = None
         self._stop_motion_tick()
         if self._render_job:
             self._root.after_cancel(self._render_job)
@@ -231,14 +247,28 @@ class MinimapWindow:
     def _on_drag(self, event) -> None:
         if not self._win or self._drag_offset is None:
             return
-        x = event.x_root - self._drag_offset[0]
-        y = event.y_root - self._drag_offset[1]
+        self._pending_pos = (
+            event.x_root - self._drag_offset[0],
+            event.y_root - self._drag_offset[1],
+        )
+        if self._move_job is None:
+            self._move_job = self._root.after_idle(self._apply_move)
+
+    def _apply_move(self) -> None:
+        self._move_job = None
+        if not self._win or self._pending_pos is None:
+            return
+        x, y = self._pending_pos
         self._win.geometry(f"+{x}+{y}")
 
     def _end_drag(self, _event) -> None:
         if not self._win:
             return
         self._drag_offset = None
+        if self._move_job is not None:
+            self._root.after_cancel(self._move_job)
+            self._move_job = None
+        self._apply_move()
         x, y = self._win.winfo_x(), self._win.winfo_y()
         self._saved_position = (x, y)
         if self._on_position_changed:

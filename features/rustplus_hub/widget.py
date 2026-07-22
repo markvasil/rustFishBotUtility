@@ -28,6 +28,7 @@ from features.rustplus_hub.map_window import MapWindow
 from features.rustplus_hub.minimap_window import MinimapWindow
 from overlay.busy_state import BusyButton, BusyLabel, OperationRegistry
 from overlay.key_capture import KeyCapture
+from overlay.smooth_scroll import SmoothScrollableFrame
 from overlay.hotkey_util import hotkey_label
 from services.rustplus.event_bus import EventType, RustPlusEvent
 from services.rustplus.live_format import (
@@ -92,7 +93,7 @@ class RustPlusHubFeature(Feature):
         self._chat_frame: Optional[ctk.CTkFrame] = None
         self._chat_input: Optional[ctk.CTkEntry] = None
         self._poll_job: Optional[str] = None
-        self._live_scroll: Optional[ctk.CTkScrollableFrame] = None
+        self._live_scroll: Optional[SmoothScrollableFrame] = None
         self._team_frame: Optional[ctk.CTkFrame] = None
         self._events_frame: Optional[ctk.CTkFrame] = None
         self._vendors_frame: Optional[ctk.CTkFrame] = None
@@ -113,6 +114,12 @@ class RustPlusHubFeature(Feature):
         self._map_sync_job: Optional[str] = None
         self._death_expiry_job: Optional[str] = None
         self._event_dock_job: Optional[str] = None
+        self._events_dock_signature: Optional[tuple] = None
+        self._show_refresh_token = 0
+        self._servers_panel_signature: Optional[tuple] = None
+        self._devices_panel_signature: Optional[tuple] = None
+        self._cameras_panel_signature: Optional[tuple] = None
+        self._groups_panel_signature: Optional[tuple] = None
         self._vendors_signature: Optional[str] = None
         self._vendor_display_signature: Optional[str] = None
         self._map_overlay_signature: Optional[str] = None
@@ -155,7 +162,7 @@ class RustPlusHubFeature(Feature):
         self._devices_busy_label: Optional[BusyLabel] = None
         self._chat_send_btn: Optional[BusyButton] = None
         self._profit_btn: Optional[BusyButton] = None
-        self._profit_routes_frame: Optional[ctk.CTkScrollableFrame] = None
+        self._profit_routes_frame: Optional[SmoothScrollableFrame] = None
         self._profit_status_label: Optional[ctk.CTkLabel] = None
         self._profit_routes_cache: List[Dict[str, Any]] = []
         self._profit_icon_refs: List[ctk.CTkImage] = []
@@ -239,7 +246,7 @@ class RustPlusHubFeature(Feature):
         self._start_event_pump()
 
     def _build_connect_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         def step1(body: ctk.CTkFrame) -> None:
@@ -287,7 +294,7 @@ class RustPlusHubFeature(Feature):
         self._servers_outer = panel(servers_card)
         self._servers_outer.pack(fill="x", padx=12, pady=(0, 6))
         self._servers_outer.pack_propagate(False)
-        self._servers_frame = ctk.CTkScrollableFrame(
+        self._servers_frame = SmoothScrollableFrame(
             self._servers_outer,
             fg_color="transparent",
             corner_radius=0,
@@ -357,7 +364,7 @@ class RustPlusHubFeature(Feature):
         self._info_label.pack(fill="x", padx=12, pady=(0, 12))
 
     def _build_live_tab(self, parent: ctk.CTkFrame) -> None:
-        self._live_scroll = ctk.CTkScrollableFrame(
+        self._live_scroll = SmoothScrollableFrame(
             parent,
             fg_color="transparent",
             corner_radius=0,
@@ -393,30 +400,30 @@ class RustPlusHubFeature(Feature):
         self._chat_send_btn.widget.pack(side="left")
 
     def _build_map_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_map_section(scroll)
 
     def _build_shops_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_vendors_section(scroll)
         self._build_shop_analytics_section(scroll)
 
     def _build_devices_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_devices_section(scroll)
         self._build_device_hotkeys_section(scroll)
         self._build_cameras_section(scroll)
 
     def _build_notifications_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_notifications_section(scroll)
 
     def _build_settings_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        scroll = SmoothScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._build_settings_section(scroll)
 
@@ -435,19 +442,34 @@ class RustPlusHubFeature(Feature):
         # и Connect залипает после ухода на другие вкладки.
         self._start_event_pump()
         self._refresh_status()
-        self._refresh_servers()
-        self._refresh_devices_panel()
-        self._refresh_cameras_panel()
         self._refresh_fcm_warning()
-        self._refresh_groups_label()
         self._start_event_dock_refresh()
+        self._show_refresh_token += 1
+        token = self._show_refresh_token
+        self._root.after_idle(lambda: self._deferred_on_show_refresh(token))
+
+    def _deferred_on_show_refresh(self, token: int) -> None:
+        if token != self._show_refresh_token:
+            return
+        self._refresh_servers()
+        if token != self._show_refresh_token:
+            return
+        self._refresh_devices_panel()
+        if token != self._show_refresh_token:
+            return
+        self._refresh_cameras_panel()
+        if token != self._show_refresh_token:
+            return
+        self._refresh_groups_label()
+        if token != self._show_refresh_token:
+            return
         if self._service.connection.is_connected:
             self._service.refresh_device_states()
 
     def _section_title(self, parent: ctk.CTkFrame, text: str, subtitle: Optional[str] = None) -> None:
         section_header(parent, text, subtitle)
 
-    def _build_team_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_team_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "Команда", "Онлайн, грид и статус")
         self._team_frame = panel(parent)
         self._team_frame.pack(fill="x", padx=4, pady=(0, 8))
@@ -455,7 +477,7 @@ class RustPlusHubFeature(Feature):
             self._team_frame, text="Подключитесь к серверу", text_color=Theme.DIM,
         ).pack(anchor="w", padx=10, pady=10)
 
-    def _build_events_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_events_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "События", "Клик — трекинг на карте")
         self._events_frame = panel(parent)
         self._events_frame.pack(fill="x", padx=4, pady=(0, 8))
@@ -463,7 +485,7 @@ class RustPlusHubFeature(Feature):
             self._events_frame, text="Нет активных событий", text_color=Theme.DIM,
         ).pack(anchor="w", padx=10, pady=10)
 
-    def _build_alerts_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_alerts_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "Журнал алертов", "Toast + история")
         self._alerts_frame = panel(parent)
         self._alerts_frame.pack(fill="x", padx=4, pady=(0, 8))
@@ -474,7 +496,7 @@ class RustPlusHubFeature(Feature):
             font=ctk.CTkFont(size=10),
         ).pack(anchor="w", padx=10, pady=10)
 
-    def _build_vendors_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_vendors_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "Магазины", "Выберите товар — покажем лавки, цену и остаток")
         filter_row = ctk.CTkFrame(parent, fg_color="transparent")
         filter_row.pack(fill="x", padx=4, pady=(0, 6))
@@ -546,7 +568,7 @@ class RustPlusHubFeature(Feature):
             self._vendors_frame, text="Нет товаров в наличии", text_color=Theme.DIM,
         ).pack(anchor="w", padx=10, pady=10)
 
-    def _build_shop_analytics_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_shop_analytics_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(
             parent,
             "Аналитика магазинов",
@@ -573,7 +595,7 @@ class RustPlusHubFeature(Feature):
             "Ищет выгодные цепочки обменов для всех валют из лавок: стартуете с 1 шт. "
             "и возвращаетесь к той же валюте с прибылью (до 3 шагов).",
         )
-        self._profit_routes_frame = ctk.CTkScrollableFrame(
+        self._profit_routes_frame = SmoothScrollableFrame(
             analytics_card,
             fg_color=Theme.PANEL,
             height=220,
@@ -582,7 +604,7 @@ class RustPlusHubFeature(Feature):
         self._profit_routes_frame.pack(fill="x", padx=10, pady=(0, 10))
         self._render_profit_routes([])
 
-    def _build_devices_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_devices_section(self, parent: SmoothScrollableFrame) -> None:
         head = ctk.CTkFrame(parent, fg_color="transparent")
         head.pack(fill="x", padx=4, pady=(10, 6))
         ctk.CTkLabel(
@@ -639,7 +661,7 @@ class RustPlusHubFeature(Feature):
             self._set_status("Устройства обновлены")
         self._root.after(1200, self._end_devices_refresh)
 
-    def _build_device_hotkeys_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_device_hotkeys_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(
             parent,
             "Горячие клавиши и группы",
@@ -659,7 +681,7 @@ class RustPlusHubFeature(Feature):
         pick_actions.pack(fill="x", padx=10, pady=(0, 4))
         btn_secondary(pick_actions, "Все", self._select_all_switches, width=60, height=26).pack(side="left", padx=(0, 6))
         btn_secondary(pick_actions, "Сбросить", self._clear_switch_selection, width=80, height=26).pack(side="left")
-        self._switch_pick_frame = ctk.CTkScrollableFrame(
+        self._switch_pick_frame = SmoothScrollableFrame(
             hotkeys_card, fg_color=Theme.CARD_ALT, height=110, corner_radius=8,
         )
         self._switch_pick_frame.pack(fill="x", padx=10, pady=(0, 4))
@@ -731,7 +753,7 @@ class RustPlusHubFeature(Feature):
         self._refresh_switch_picker()
         self._refresh_groups_label()
 
-    def _build_cameras_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_cameras_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "Камеры", "CCTV / PTZ — DOME1, OILRIG1L1…")
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=4, pady=(0, 6))
@@ -753,7 +775,7 @@ class RustPlusHubFeature(Feature):
         self._cameras_frame.pack(fill="x", padx=4, pady=(0, 8))
         self._refresh_cameras_panel()
 
-    def _build_map_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_map_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(parent, "Карта", "Миникарта: ЛКМ drag, ПКМ скрыть · грузится после подключения")
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=4, pady=(0, 6))
@@ -829,7 +851,7 @@ class RustPlusHubFeature(Feature):
         self._map_preview.pack(fill="x", padx=4, pady=(0, 8))
         self._map_preview.bind("<Button-1>", lambda _e: self._open_map_window())
 
-    def _build_notifications_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_notifications_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(
             parent,
             "Уведомления",
@@ -894,7 +916,7 @@ class RustPlusHubFeature(Feature):
                 anchor="w",
             ).pack(side="left", padx=(8, 0))
 
-    def _build_settings_section(self, parent: ctk.CTkScrollableFrame) -> None:
+    def _build_settings_section(self, parent: SmoothScrollableFrame) -> None:
         self._section_title(
             parent,
             "Настройки",
@@ -1579,6 +1601,61 @@ class RustPlusHubFeature(Feature):
             text=f"В группу / hotkey попадёт ({len(selected)}): {names}",
         )
 
+    def _compute_servers_signature(self) -> tuple:
+        servers = self._service.store.list_servers()
+        active = self._service.connection.connected_server
+        active_id = active.id if active else None
+        return (
+            tuple((s.id, s.name, s.ip, s.port, s.player_token) for s in servers),
+            active_id,
+            self._connecting_server_id,
+        )
+
+    def _compute_devices_signature(self) -> tuple:
+        server = self._service.connection.connected_server
+        if not server:
+            return (None,)
+        devices = self._service.store.list_devices(server.id)
+        return (
+            server.id,
+            tuple((d.id, d.name, d.device_type, d.entity_id) for d in devices),
+            tuple(
+                sorted(
+                    (
+                        entity_id,
+                        state.get("value"),
+                        state.get("items"),
+                        state.get("capacity"),
+                        state.get("has_protection"),
+                        state.get("protection_expiry"),
+                    )
+                    for entity_id, state in self._device_states.items()
+                )
+            ),
+            tuple(sorted(self._device_hotkey_hints(server.id).items())),
+        )
+
+    def _compute_cameras_signature(self) -> tuple:
+        server = self._service.get_active_server()
+        if not server:
+            return (None,)
+        cameras = self._service.store.list_cameras(server.id)
+        return (
+            server.id,
+            tuple((c.id, c.name, c.camera_id) for c in cameras),
+        )
+
+    def _compute_groups_signature(self) -> tuple:
+        server = self._service.get_active_server()
+        groups = self._service.store.list_device_groups(server.id if server else None)
+        hotkeys = self._service.store.list_device_hotkeys()
+        return (
+            server.id if server else None,
+            tuple((g.id, g.name, tuple(g.device_ids)) for g in groups),
+            tuple(sorted((did, var.get()) for did, var in getattr(self, "_switch_check_vars", {}).items())),
+            tuple((h.id, h.hotkey, h.action, h.device_id, h.group_id) for h in hotkeys),
+        )
+
     def _refresh_switch_picker(self) -> None:
         if not hasattr(self, "_switch_pick_frame") or self._switch_pick_frame is None:
             return
@@ -1627,6 +1704,10 @@ class RustPlusHubFeature(Feature):
         return ", ".join(names) if names else "пусто"
 
     def _refresh_groups_label(self) -> None:
+        signature = self._compute_groups_signature()
+        if signature == self._groups_panel_signature:
+            return
+        self._groups_panel_signature = signature
         self._refresh_switch_picker()
         if hasattr(self, "_groups_list_frame") and self._groups_list_frame is not None:
             for child in self._groups_list_frame.winfo_children():
@@ -1936,6 +2017,7 @@ class RustPlusHubFeature(Feature):
     def _track_event(self, event_id: Optional[int]) -> None:
         self._service.store.set_tracked_event_id(event_id)
         self._map_overlay_signature = None
+        self._events_dock_signature = None
         self._refresh_events_panel(self._events_cache)
         self._schedule_map_overlay_sync()
         if event_id:
@@ -2065,6 +2147,31 @@ class RustPlusHubFeature(Feature):
             badges.append(("vendor", Theme.MUTED))
         return badges
 
+    def _events_dock_signature(self) -> tuple:
+        import time as _time
+
+        tracked_event_id = self._service.store.get_tracked_event_id()
+        parts: List[tuple] = []
+        for event in self._events_cache[:8]:
+            eid = event.get("id")
+            is_tracked = eid is not None and int(eid) == int(tracked_event_id or 0)
+            cargo_status = event.get("cargo_status") or {}
+            remaining = cargo_status.get("remaining_minutes")
+            if cargo_status.get("in_harbor") and cargo_status.get("harbor_since") and cargo_status.get("harbor_seconds"):
+                remaining = max(
+                    0,
+                    int((float(cargo_status["harbor_seconds"]) - (_time.time() - float(cargo_status["harbor_since"]))) / 60),
+                )
+            parts.append((
+                eid,
+                is_tracked,
+                event.get("type_name"),
+                event.get("grid"),
+                remaining,
+                tuple(cargo_status.get("route") or []),
+            ))
+        return tuple(parts)
+
     def _start_event_dock_refresh(self) -> None:
         if self._event_dock_job:
             return
@@ -2072,7 +2179,10 @@ class RustPlusHubFeature(Feature):
         def tick():
             self._event_dock_job = None
             if self._events_cache:
-                self._refresh_events_panel(self._events_cache)
+                signature = self._events_dock_signature()
+                if signature != self._events_dock_signature:
+                    self._events_dock_signature = signature
+                    self._refresh_events_panel(self._events_cache)
             self._start_event_dock_refresh()
 
         self._event_dock_job = self._root.after(1000, tick)
@@ -2491,6 +2601,10 @@ class RustPlusHubFeature(Feature):
     def _refresh_devices_panel(self) -> None:
         if not self._devices_frame:
             return
+        signature = self._compute_devices_signature()
+        if signature == self._devices_panel_signature:
+            return
+        self._devices_panel_signature = signature
         self._clear_frame(self._devices_frame)
         server = self._service.connection.connected_server
         if not server:
@@ -2708,6 +2822,10 @@ class RustPlusHubFeature(Feature):
     def _refresh_cameras_panel(self) -> None:
         if not self._cameras_frame:
             return
+        signature = self._compute_cameras_signature()
+        if signature == self._cameras_panel_signature:
+            return
+        self._cameras_panel_signature = signature
         self._clear_frame(self._cameras_frame)
         server = self._service.get_active_server()
         if not server:
@@ -2874,6 +2992,7 @@ class RustPlusHubFeature(Feature):
     def on_hide(self) -> None:
         # Event pump НЕ останавливаем: pairing/connect/алерты должны работать
         # в фоне, пока открыта любая вкладка оверлея.
+        self._show_refresh_token += 1
         if self._event_dock_job:
             self._root.after_cancel(self._event_dock_job)
             self._event_dock_job = None
@@ -3053,8 +3172,11 @@ class RustPlusHubFeature(Feature):
     def _refresh_servers(self) -> None:
         if not self._servers_frame:
             return
+        signature = self._compute_servers_signature()
+        if signature == self._servers_panel_signature:
+            return
+        self._servers_panel_signature = signature
         self._connect_buttons.clear()
-        self._service.store.load()
         for w in self._servers_frame.winfo_children():
             w.destroy()
 
@@ -3339,6 +3461,7 @@ class RustPlusHubFeature(Feature):
         elif event.type == EventType.MARKERS:
             self._vendors_cache = event.payload.get("vendors", [])
             self._events_cache = event.payload.get("events", [])
+            self._events_dock_signature = None
             self._refresh_events_panel(self._events_cache)
             self._schedule_vendor_refresh()
             self._schedule_map_overlay_sync()

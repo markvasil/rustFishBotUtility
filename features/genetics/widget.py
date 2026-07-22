@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set
 import customtkinter as ctk
 
 from features.base import Feature
+from overlay.smooth_scroll import SmoothScrollableFrame
 from features.genetics.breeding_planner import (
     BreedingPath,
     find_best_plant,
@@ -37,7 +38,7 @@ class GeneticsFeature(Feature):
 
         self._target_vars: Dict[str, ctk.StringVar] = {}
         self._target_sum_var: Optional[ctk.StringVar] = None
-        self._breed_paths_frame: Optional[ctk.CTkScrollableFrame] = None
+        self._breed_paths_frame: Optional[SmoothScrollableFrame] = None
         self._breed_paths_status: Optional[ctk.StringVar] = None
         self._breed_calc_btn: Optional[ctk.CTkButton] = None
         self._breed_best_btn: Optional[ctk.CTkButton] = None
@@ -246,7 +247,7 @@ class GeneticsFeature(Feature):
             justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        self._breed_paths_frame = ctk.CTkScrollableFrame(
+        self._breed_paths_frame = SmoothScrollableFrame(
             section,
             fg_color="#10151f",
             corner_radius=6,
